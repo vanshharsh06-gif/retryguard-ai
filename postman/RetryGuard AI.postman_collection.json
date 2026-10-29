@@ -1,0 +1,313 @@
+{
+  "info": {
+    "name": "RetryGuard AI - Safe Investigation Flow",
+    "description": "Secret-free Postman flow for order creation, local attempt/event tracking, timeline, deterministic investigation, and optional Gemini explanation. The simulated-event path never charges a customer. For a real Gemini check, configure GEMINI_API_KEY in the application process before starting Spring Boot and set expectGemini=true in the Postman environment.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8080"
+    }
+  ],
+  "item": [
+    {
+      "name": "Safe local investigation flow",
+      "item": [
+        {
+          "name": "1. Create merchant order",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"merchantOrderReference\": \"{{merchantOrderReference}}\",\n  \"amount\": 19.95,\n  \"currency\": \"USD\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{baseUrl}}/api/orders"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.environment.set('merchantOrderReference', `postman-${Date.now()}-${pm.variables.replaceIn('{{$guid}}')}`);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Order is created', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.orderStatus).to.eql('CREATED');",
+                  "  pm.environment.set('orderId', body.id);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2. Create local payment-attempt record (no charge)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"PAYPAL_SANDBOX\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{baseUrl}}/api/orders/{{orderId}}/payment-attempts"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Local attempt is created without charging', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.paymentStatus).to.eql('CREATED');",
+                  "  pm.expect(body.providerPaymentReference).to.be.oneOf([null, undefined]);",
+                  "  pm.environment.set('paymentAttemptId', body.id);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "3. Record simulated pending event",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"providerEventId\": \"{{providerEventId}}\",\n  \"eventType\": \"PAYMENT.PENDING\",\n  \"payload\": {\n    \"state\": \"pending\",\n    \"simulated\": true\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{baseUrl}}/api/payment-attempts/{{paymentAttemptId}}/events"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.environment.set('providerEventId', `postman-event-${Date.now()}-${pm.variables.replaceIn('{{$guid}}')}`);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Event is stored as simulated and unverified', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.sourceType).to.eql('SIMULATED');",
+                  "  pm.expect(body.verificationStatus).to.eql('NOT_APPLICABLE');",
+                  "  pm.expect(body.processingStatus).to.eql('RECEIVED');",
+                  "  pm.environment.set('paymentEventId', body.id);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4. Repeat event to check idempotency",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"providerEventId\": \"{{providerEventId}}\",\n  \"eventType\": \"PAYMENT.SUCCEEDED\",\n  \"payload\": {\n    \"state\": \"succeeded\",\n    \"simulated\": true\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{baseUrl}}/api/payment-attempts/{{paymentAttemptId}}/events"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Duplicate returns the original event unchanged', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.id).to.eql(pm.environment.get('paymentEventId'));",
+                  "  pm.expect(body.eventType).to.eql('PAYMENT.PENDING');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "5. Get order timeline",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/orders/{{orderId}}/timeline"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Timeline preserves event provenance and omits payload', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.entries.map(entry => entry.entryType)).to.include.members(['ORDER_CREATED', 'PAYMENT_ATTEMPT_CREATED', 'PAYMENT_EVENT_RECEIVED']);",
+                  "  const event = body.entries.find(entry => entry.id === pm.environment.get('paymentEventId'));",
+                  "  pm.expect(event.sourceType).to.eql('SIMULATED');",
+                  "  pm.expect(event.verificationStatus).to.eql('NOT_APPLICABLE');",
+                  "  pm.expect(event).not.to.have.property('payload');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "6. Run deterministic investigation",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/api/orders/{{orderId}}/investigations"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Unverified simulated evidence does not authorize retry', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.decision).to.eql('WAIT');",
+                  "  pm.environment.set('investigationId', body.investigationId || body.id);",
+                  "  pm.environment.set('investigationDecision', body.decision);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "7. Ask Gemini to explain persisted decision",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/api/investigations/{{investigationId}}/explanation"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Explanation keeps deterministic decision unchanged', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.decision).to.eql(pm.environment.get('investigationDecision'));",
+                  "  pm.expect(body.source).to.be.oneOf(['GEMINI', 'DETERMINISTIC_FALLBACK']);",
+                  "  pm.expect(body.explanation).to.be.a('string').and.not.empty;",
+                  "  if (pm.environment.get('expectGemini') === 'true') {",
+                  "    pm.expect(body.source, 'Live Gemini response expected').to.eql('GEMINI');",
+                  "  }",
+                  "  console.log(`Explanation source: ${body.source}`);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Optional PayPal Sandbox actions",
+      "description": "Do not run until V2__paypal_payment_references.sql is applied to the intended local database and server-side PAYPAL_CLIENT_ID/PAYPAL_CLIENT_SECRET are configured. Creating an order requires buyer approval using the returned approvalUrl before capture.",
+      "item": [
+        {
+          "name": "Create PayPal Sandbox order",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/api/payment-attempts/{{paymentAttemptId}}/paypal/order"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('PayPal order created', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const body = pm.response.json();",
+                  "  pm.environment.set('paypalOrderId', body.providerOrderId);",
+                  "  pm.environment.set('paypalApprovalUrl', body.approvalUrl || '');",
+                  "  console.log(`Buyer approval URL: ${body.approvalUrl}`);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Capture approved PayPal Sandbox order",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/api/payment-attempts/{{paymentAttemptId}}/paypal/capture"
+          }
+        }
+      ]
+    }
+  ]
+}

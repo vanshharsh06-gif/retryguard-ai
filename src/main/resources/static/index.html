@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101a28">
+  <title>RetryGuard AI | Payment Autopsy</title>
+  <style>
+    :root{color-scheme:dark;--bg:#0c1420;--panel:#131f2e;--panel2:#19283a;--line:#2a3a4d;--text:#eef4fb;--muted:#a4b3c4;--mint:#71e3c0;--blue:#83b7ff;--amber:#f5c56a;--red:#ff9292;--radius:16px;font:15px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+    *{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 85% -20%,#223a50 0,transparent 38%),var(--bg);color:var(--text)}
+    header{padding:28px max(22px,calc((100vw - 1200px)/2));border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:20px}
+    .brand{display:flex;align-items:center;gap:13px}.mark{width:42px;height:42px;border-radius:13px;background:linear-gradient(135deg,#7be3c3,#7db5ff);color:#0c1925;display:grid;place-items:center;font-weight:900;font-size:20px}.brand h1{font-size:18px;margin:0;letter-spacing:.02em}.brand p{margin:2px 0 0;color:var(--muted);font-size:12px}
+    .demo{padding:8px 12px;border:1px solid #755d35;border-radius:999px;color:#ffdfa4;background:#3b3020;font-size:12px;font-weight:700}
+    main{max-width:1200px;margin:30px auto;padding:0 22px 56px}.intro{display:flex;justify-content:space-between;align-items:end;gap:24px;margin-bottom:24px}.intro h2{margin:0;font-size:clamp(25px,4vw,38px);letter-spacing:-.04em}.intro p{max-width:670px;margin:9px 0 0;color:var(--muted)}
+    .layout{display:grid;grid-template-columns:minmax(265px,340px) minmax(0,1fr);gap:20px;align-items:start}.stack{display:grid;gap:16px}.card{background:linear-gradient(155deg,#172536,#111c2a);border:1px solid var(--line);border-radius:var(--radius);padding:20px;box-shadow:0 12px 30px #0002}.card h3{margin:0 0 15px;font-size:16px}.subhead{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:13px}.subhead h3{margin:0}
+    label{display:block;color:#bfccda;font-size:12px;font-weight:700;margin:12px 0 6px}input,select{width:100%;background:#0b1521;color:var(--text);border:1px solid #34475c;border-radius:9px;padding:11px 12px;font:inherit;min-height:42px}input:focus,select:focus,button:focus-visible,a:focus-visible{outline:2px solid var(--mint);outline-offset:2px}
+    button,.button{border:0;border-radius:9px;padding:10px 14px;font:inherit;font-size:13px;font-weight:700;color:#10202d;background:var(--mint);cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;min-height:40px;transition:filter .15s,transform .15s}button:hover,.button:hover{filter:brightness(1.08);transform:translateY(-1px)}button:disabled{opacity:.55;cursor:wait;transform:none}.secondary{background:#24364a;color:var(--text);border:1px solid #40556d}.warn{background:#4c3b20;color:#ffe0a5;border:1px solid #87683a}.danger{background:#48292d;color:#ffd7d7;border:1px solid #774249}.actions{display:flex;flex-wrap:wrap;gap:9px;margin-top:15px}.toolbar{display:flex;gap:8px;align-items:center}.toolbar select{min-width:180px}
+    .muted{color:var(--muted)}.small{font-size:12px}.status{min-height:22px;margin-top:12px;color:var(--muted);font-size:13px}.status.error{color:var(--red)}.status.success{color:var(--mint)}
+    .order-meta{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-top:14px}.metric{padding:10px;background:#0c1723;border:1px solid #26384a;border-radius:10px}.metric span{display:block;color:var(--muted);font-size:11px}.metric strong{display:block;margin-top:3px;font-size:13px;overflow-wrap:anywhere}
+    .timeline{display:grid;gap:0;margin:10px 0 0}.timeline-item{display:grid;grid-template-columns:20px minmax(0,1fr);gap:11px;position:relative;padding-bottom:17px}.timeline-item:not(:last-child):before{content:"";position:absolute;left:7px;top:18px;bottom:-1px;width:1px;background:#3b526a}.dot{width:15px;height:15px;border-radius:50%;margin-top:3px;background:var(--blue);border:3px solid #263d54}.timeline-item h4{margin:0;font-size:13px}.timeline-item p{margin:3px 0;color:var(--muted);font-size:12px;overflow-wrap:anywhere}
+    .investigation{margin-top:14px;padding:15px;border:1px solid #354b60;background:#0e1925;border-radius:12px}.decision{font-size:13px;font-weight:800;letter-spacing:.07em}.decision.RETRY_ELIGIBLE{color:var(--mint)}.decision.WAIT{color:var(--amber)}.decision.RECONCILE{color:var(--red)}.finding{margin-top:10px;border:1px solid #34465a;border-radius:11px;padding:13px;background:#142232}.finding-top{display:flex;justify-content:space-between;align-items:center;gap:12px}.finding h4{margin:0;font-size:14px}.finding p{margin:8px 0;color:#cad5e0;font-size:13px}.tag{font-size:10px;letter-spacing:.06em;font-weight:800;padding:4px 7px;border-radius:999px;background:#263a4d;color:#d7e8f9;white-space:nowrap}.tag.HIGH{background:#4a292c;color:#ffc6c6}.tag.MEDIUM{background:#4a3a22;color:#ffe0a1}.tag.LOW,.tag.INFO{background:#1f443c;color:#a9f0d8}.recommend{border-left:2px solid var(--mint);padding-left:9px;color:#c0f0e2!important}.refs{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px}.ref{font:11px ui-monospace,SFMono-Regular,Consolas,monospace;background:#0b1520;border:1px solid #314256;border-radius:6px;padding:4px 6px;color:#c6d8e9}
+    .empty{padding:24px;text-align:center;border:1px dashed #405168;border-radius:11px;color:var(--muted);font-size:13px}.history{display:grid;gap:8px;margin-top:10px}.history-row{padding:10px;background:#101c29;border-radius:9px;font-size:12px}.history-row strong{color:var(--blue)}.explanation{padding:13px;border:1px solid #34495e;border-radius:10px;margin-top:12px;background:#0d1824;white-space:pre-wrap}.hidden{display:none!important}
+    footer{max-width:1200px;margin:auto;padding:0 22px 25px;color:#8fa0b2;font-size:11px}
+    @media(max-width:840px){.layout{grid-template-columns:1fr}.intro{display:block}.demo{display:inline-block;margin-top:15px}}
+    @media(max-width:500px){header{padding:18px 16px;align-items:flex-start}.demo{font-size:10px;padding:7px 9px}main{padding:0 14px 38px;margin-top:22px}.card{padding:16px}.toolbar{align-items:stretch;flex-direction:column}.toolbar select{min-width:0}.order-meta{grid-template-columns:1fr 1fr}.finding-top{align-items:flex-start;flex-direction:column}}
+  </style>
+</head>
+<body>
+<header>
+  <div class="brand"><div class="mark" aria-hidden="true">R</div><div><h1>RetryGuard AI</h1><p>Payment Autopsy Console</p></div></div>
+  <div class="demo">PAYPAL SANDBOX · DEMO ONLY</div>
+</header>
+<main>
+  <section class="intro">
+    <div><h2>Understand the payment story.</h2><p>Reconstruct order activity, inspect verified evidence, and review a conservative investigation. Recommendations are informational; no payment action happens automatically.</p></div>
+  </section>
+  <div class="layout">
+    <aside class="stack">
+      <section class="card">
+        <h3>Create merchant order</h3>
+        <form id="order-form">
+          <label for="reference">Merchant reference</label><input id="reference" name="merchantOrderReference" maxlength="100" required placeholder="demo-order-001">
+          <label for="amount">Amount</label><input id="amount" name="amount" type="number" min="0.01" step="0.01" required placeholder="25.00">
+          <label for="currency">Currency</label><input id="currency" name="currency" maxlength="3" pattern="[A-Z]{3}" value="USD" required>
+          <div class="actions"><button id="create-order" type="submit">Create order</button></div>
+          <div id="create-status" class="status" role="status"></div>
+        </form>
+      </section>
+      <section class="card">
+        <div class="subhead"><h3>Orders</h3><button id="refresh-orders" class="secondary" type="button">Refresh</button></div>
+        <label for="order-select">Recent orders (up to 50)</label><select id="order-select"><option value="">Loading orders…</option></select>
+        <div id="order-summary" class="empty" style="margin-top:12px">Select an order to inspect its payment activity.</div>
+      </section>
+      <section class="card">
+        <h3>Payment attempt</h3>
+        <p class="muted small">Creates a local tracking record only. This does not charge a buyer.</p>
+        <label for="provider">Provider</label><select id="provider"><option value="PAYPAL_SANDBOX">PAYPAL_SANDBOX</option></select>
+        <label for="attempt-select">Attempt for Sandbox actions</label><select id="attempt-select"><option value="">No attempts loaded</option></select>
+        <div class="actions"><button id="create-attempt" type="button">Create attempt</button></div>
+        <div id="attempt-status" class="status" role="status"></div>
+      </section>
+    </aside>
+    <section class="stack">
+      <section class="card">
+        <div class="subhead"><h3>Payment timeline</h3><span id="timeline-label" class="muted small">No order selected</span></div>
+        <div id="timeline" class="empty">Choose an order to load its real timeline.</div>
+      </section>
+      <section class="card">
+        <div class="subhead"><h3>Explicit PayPal Sandbox actions</h3><span class="tag">NO AUTOMATIC CAPTURE</span></div>
+        <p class="muted small">Create an approval link or capture an existing Sandbox order only when you explicitly choose the corresponding action. Capture is confirmed before the request is sent.</p>
+        <div class="actions">
+          <button id="paypal-order" class="warn" type="button">Create Sandbox order</button>
+          <button id="paypal-capture" class="danger" type="button">Capture Sandbox payment</button>
+        </div>
+        <div id="paypal-status" class="status" role="status"></div>
+        <div id="approval-link" class="hidden" style="margin-top:10px"></div>
+      </section>
+      <section class="card">
+        <div class="subhead"><h3>Payment autopsy</h3><button id="run-investigation" type="button">Run investigation</button></div>
+        <p class="muted small">The deterministic rules decide. Findings cite persisted evidence and never execute a payment action.</p>
+        <label for="investigation-select">Previous investigations</label><select id="investigation-select"><option value="">No investigations loaded</option></select>
+        <div id="investigation-result" class="empty" style="margin-top:12px">Run an investigation or select a previous run.</div>
+        <div class="actions"><button id="explain" class="secondary" type="button" disabled>Explain with Gemini</button></div>
+        <div id="explanation" class="hidden explanation" aria-live="polite"></div>
+      </section>
+      <section class="card">
+        <div class="subhead"><h3>Investigation history</h3><span id="history-label" class="muted small"></span></div>
+        <div id="history" class="empty">Select an investigation to view its audit history.</div>
+      </section>
+    </section>
+  </div>
+</main>
+<footer>Demo interface only. Authentication and authorization are not implemented; run behind trusted infrastructure. Sandbox credentials remain server-side and are never sent to this page.</footer>
+<script>
+(() => {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const state = { orderId: "", attemptId: "", investigationId: "", orders: [] };
+  const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[char]));
+  const message = (id, text, kind = "") => {
+    const node = $(id); node.textContent = text; node.className = `status ${kind}`.trim();
+  };
+  async function api(path, options = {}) {
+    const response = await fetch(path, {
+      ...options,
+      headers: { ...(options.body ? { "Content-Type": "application/json" } : {}), ...(options.headers || {}) }
+    });
+    const text = await response.text();
+    let body = null;
+    if (text) { try { body = JSON.parse(text); } catch { body = text; } }
+    if (!response.ok) {
+      const detail = body && typeof body === "object" ? (body.detail || body.title) : body;
+      throw new Error(detail || `Request failed (${response.status}).`);
+    }
+    return body;
+  }
+  const time = (value) => value ? new Date(value).toLocaleString() : "Time unavailable";
+  const idShort = (id) => id ? `${id.slice(0, 8)}…` : "unknown";
+
+  async function loadOrders(preferredId = state.orderId) {
+    const select = $("order-select");
+    select.innerHTML = '<option value="">Loading…</option>';
+    const orders = await api("/api/orders");
+    state.orders = Array.isArray(orders) ? orders : [];
+    select.innerHTML = '<option value="">Select an order…</option>' + state.orders.map((order) =>
+      `<option value="${escapeHtml(order.id)}">${escapeHtml(order.merchantOrderReference)} · ${escapeHtml(order.amount)} ${escapeHtml(order.currency)} · ${escapeHtml(order.orderStatus)}</option>`
+    ).join("");
+    if (!state.orders.length) {
+      $("order-summary").className = "empty"; $("order-summary").textContent = "No orders yet. Create a merchant order to begin.";
+      state.orderId = ""; return;
+    }
+    const selected = state.orders.some((order) => order.id === preferredId) ? preferredId : state.orders[0].id;
+    select.value = selected; await selectOrder(selected);
+  }
+  async function selectOrder(orderId) {
+    state.orderId = orderId || ""; state.attemptId = ""; state.investigationId = "";
+    $("explain").disabled = true; $("explanation").classList.add("hidden");
+    $("investigation-result").className = "empty";
+    $("history").className = "empty"; $("history").textContent = "Select an investigation to view its audit history.";
+    if (!orderId) return;
+    const order = state.orders.find((item) => item.id === orderId);
+    if (order) {
+      $("order-summary").className = "order-meta";
+      $("order-summary").innerHTML = [
+        ["Status", order.orderStatus], ["Amount", `${order.amount} ${order.currency}`], ["Reference", order.merchantOrderReference]
+      ].map(([label, value]) => `<div class="metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+    }
+    await Promise.all([loadTimeline(), loadInvestigations()]);
+  }
+  async function loadTimeline() {
+    $("timeline").className = "empty"; $("timeline").textContent = "Loading timeline…";
+    $("timeline-label").textContent = "Loading…";
+    try {
+      const timeline = await api(`/api/orders/${encodeURIComponent(state.orderId)}/timeline`);
+      const entries = timeline.entries || [];
+      const attempts = entries.filter((entry) => entry.entryType === "PAYMENT_ATTEMPT_CREATED");
+      const attemptSelect = $("attempt-select");
+      attemptSelect.innerHTML = attempts.length
+        ? attempts.map((entry) => `<option value="${escapeHtml(entry.id)}">${escapeHtml(idShort(entry.id))} · ${escapeHtml(entry.provider)} · ${escapeHtml(entry.currentStatus)}</option>`).join("")
+        : '<option value="">No attempts loaded</option>';
+      state.attemptId = attempts.some((entry) => entry.id === state.attemptId)
+        ? state.attemptId : (attempts[0]?.id || "");
+      attemptSelect.value = state.attemptId;
+      $("timeline-label").textContent = `${timeline.currentOrderStatus} · ${entries.length} entries`;
+      if (!entries.length) { $("timeline").className = "empty"; $("timeline").textContent = "No payment activity recorded."; return; }
+      $("timeline").className = "timeline";
+      $("timeline").innerHTML = entries.map((entry) => {
+        const details = [
+          entry.provider, entry.currentStatus, entry.eventType,
+          entry.sourceType, entry.verificationStatus && `verification: ${entry.verificationStatus}`,
+          entry.processingStatus && `processing: ${entry.processingStatus}`,
+          entry.amount != null && `${entry.amount} ${entry.currency}`,
+          entry.providerEventId && `event ${entry.providerEventId}`
+        ].filter(Boolean).join(" · ");
+        return `<div class="timeline-item"><span class="dot"></span><div><h4>${escapeHtml(entry.entryType.replaceAll("_", " "))}</h4><p>${escapeHtml(time(entry.occurredAt))}${details ? ` · ${escapeHtml(details)}` : ""}</p><p class="small">Record ${escapeHtml(idShort(entry.id))}</p></div></div>`;
+      }).join("");
+    } catch (error) { $("timeline").className = "empty"; $("timeline").textContent = error.message; $("timeline-label").textContent = "Unavailable"; }
+  }
+  async function loadInvestigations(preferredId = "") {
+    const select = $("investigation-select");
+    select.innerHTML = '<option value="">Loading…</option>';
+    try {
+      const list = await api(`/api/orders/${encodeURIComponent(state.orderId)}/investigations`);
+      select.innerHTML = '<option value="">Select a previous investigation…</option>' + list.map((item) =>
+        `<option value="${escapeHtml(item.id)}">${escapeHtml(time(item.createdAt))} · ${escapeHtml(item.decision)} · ${escapeHtml(item.reason)}</option>`
+      ).join("");
+      if (!list.length) {
+        $("investigation-result").className = "empty"; $("investigation-result").textContent = "No investigations have been run for this order.";
+        return;
+      }
+      const id = list.some((item) => item.id === preferredId) ? preferredId : list[0].id;
+      select.value = id; await selectInvestigation(id);
+    } catch (error) { select.innerHTML = '<option value="">Could not load investigations</option>'; $("investigation-result").textContent = error.message; }
+  }
+  async function selectInvestigation(id) {
+    state.investigationId = id || "";
+    $("explain").disabled = !id; $("explanation").classList.add("hidden");
+    if (!id) return;
+    try {
+      const [investigation, history] = await Promise.all([
+        api(`/api/investigations/${encodeURIComponent(id)}`),
+        api(`/api/investigations/${encodeURIComponent(id)}/history`)
+      ]);
+      renderInvestigation(investigation); renderHistory(history);
+    } catch (error) { $("investigation-result").className = "empty"; $("investigation-result").textContent = error.message; }
+  }
+  function renderInvestigation(item) {
+    const findings = item.findings || [];
+    const findingHtml = findings.length ? findings.map((finding) => {
+      const refs = (finding.evidence || []).map((ref) => `<span class="ref">${escapeHtml(ref.type)} · ${escapeHtml(idShort(ref.id))}</span>`).join("");
+      return `<article class="finding"><div class="finding-top"><h4>${escapeHtml(finding.title)}</h4><span class="tag ${escapeHtml(finding.severity)}">${escapeHtml(finding.severity)}</span></div><p>${escapeHtml(finding.description)}</p><div class="small muted">${escapeHtml(finding.code)} · ${escapeHtml(finding.rootCauseCategory)} · root cause uncertain: ${finding.rootCauseUncertain ? "yes" : "no"}</div><div class="refs">${refs || '<span class="muted small">No linked evidence reference</span>'}</div><p class="recommend"><strong>Operator review:</strong> ${escapeHtml(finding.recommendedAction)}</p></article>`;
+    }).join("") : '<div class="empty">No finding category is supported by the recorded evidence.</div>';
+    $("investigation-result").className = "investigation";
+    $("investigation-result").innerHTML = `<div class="decision ${escapeHtml(item.decision)}">${escapeHtml(item.decision.replaceAll("_", " "))}</div><p><strong>${escapeHtml(item.reason)}</strong><br>${escapeHtml(item.explanation)}</p><div class="small muted">Rules ${escapeHtml(item.rulesVersion)} · ${escapeHtml(time(item.createdAt))}</div><h4 style="margin:15px 0 7px">Evidence-based findings</h4>${findingHtml}`;
+  }
+  function renderHistory(items) {
+    $("history-label").textContent = `${items.length} audit ${items.length === 1 ? "entry" : "entries"}`;
+    if (!items.length) { $("history").className = "empty"; $("history").textContent = "No history entries."; return; }
+    $("history").className = "history";
+    $("history").innerHTML = items.map((entry) => `<div class="history-row"><strong>${escapeHtml(entry.action)}</strong> · ${escapeHtml(entry.previousDecision || "—")} → ${escapeHtml(entry.newDecision || "—")}<br><span class="muted">${escapeHtml(entry.reason)} · ${escapeHtml(time(entry.createdAt))}</span></div>`).join("");
+  }
+  $("order-form").addEventListener("submit", async (event) => {
+    event.preventDefault(); const form = new FormData(event.currentTarget);
+    const payload = Object.fromEntries(form.entries()); payload.amount = Number(payload.amount);
+    payload.currency = payload.currency.trim().toUpperCase();
+    $("create-order").disabled = true; message("create-status", "Creating order…");
+    try {
+      const order = await api("/api/orders", { method: "POST", body: JSON.stringify(payload) });
+      message("create-status", `Order created: ${order.merchantOrderReference}`, "success");
+      event.currentTarget.reset(); $("currency").value = "USD"; await loadOrders(order.id);
+    } catch (error) { message("create-status", error.message, "error"); }
+    finally { $("create-order").disabled = false; }
+  });
+  $("refresh-orders").addEventListener("click", () => loadOrders().catch((error) => {
+    $("order-summary").className = "empty"; $("order-summary").textContent = error.message;
+  }));
+  $("order-select").addEventListener("change", (event) => selectOrder(event.target.value));
+  $("attempt-select").addEventListener("change", (event) => { state.attemptId = event.target.value; });
+  $("create-attempt").addEventListener("click", async () => {
+    if (!state.orderId) { message("attempt-status", "Select an order first.", "error"); return; }
+    const button = $("create-attempt"); button.disabled = true; message("attempt-status", "Creating local attempt…");
+    try {
+      const attempt = await api(`/api/orders/${encodeURIComponent(state.orderId)}/payment-attempts`, {
+        method: "POST", body: JSON.stringify({ provider: $("provider").value })
+      });
+      state.attemptId = attempt.id;
+      message("attempt-status", `Attempt ${idShort(attempt.id)} created (${attempt.paymentStatus}). No charge was made.`, "success");
+      await loadTimeline();
+    } catch (error) { message("attempt-status", error.message, "error"); }
+    finally { button.disabled = false; }
+  });
+  $("paypal-order").addEventListener("click", async () => {
+    if (!state.attemptId) { message("paypal-status", "Create or select an order with a payment attempt first.", "error"); return; }
+    const button = $("paypal-order"); button.disabled = true; $("approval-link").classList.add("hidden");
+    message("paypal-status", "Requesting PayPal Sandbox order…");
+    try {
+      const result = await api(`/api/payment-attempts/${encodeURIComponent(state.attemptId)}/paypal/order`, { method: "POST" });
+      message("paypal-status", `Sandbox order created (${result.providerStatus}). Open the approval link to continue in PayPal.`, "success");
+      if (result.approvalUrl) {
+        const approval = new URL(result.approvalUrl);
+        if (approval.protocol === "https:" && approval.hostname === "www.sandbox.paypal.com") {
+          $("approval-link").innerHTML = `<a class="button secondary" href="${escapeHtml(approval.href)}" target="_blank" rel="noopener noreferrer">Open PayPal approval</a>`;
+          $("approval-link").classList.remove("hidden");
+        }
+      }
+      await loadTimeline();
+    } catch (error) { message("paypal-status", error.message, "error"); }
+    finally { button.disabled = false; }
+  });
+  $("paypal-capture").addEventListener("click", async () => {
+    if (!state.attemptId) { message("paypal-status", "Create or select a payment attempt first.", "error"); return; }
+    if (!window.confirm("Send an explicit capture request for this PayPal Sandbox payment?")) return;
+    const button = $("paypal-capture"); button.disabled = true; message("paypal-status", "Sending explicit Sandbox capture request…");
+    try {
+      const result = await api(`/api/payment-attempts/${encodeURIComponent(state.attemptId)}/paypal/capture`, { method: "POST" });
+      message("paypal-status", `Capture response: ${result.providerStatus} · local status: ${result.paymentStatus}.`, "success");
+      await loadTimeline();
+    } catch (error) { message("paypal-status", error.message, "error"); }
+    finally { button.disabled = false; }
+  });
+  $("run-investigation").addEventListener("click", async () => {
+    if (!state.orderId) { $("investigation-result").className = "empty"; $("investigation-result").textContent = "Select an order first."; return; }
+    const button = $("run-investigation"); button.disabled = true; $("investigation-result").className = "empty"; $("investigation-result").textContent = "Evaluating persisted payment evidence…";
+    try {
+      const result = await api(`/api/orders/${encodeURIComponent(state.orderId)}/investigations`, { method: "POST" });
+      await loadInvestigations(result.id);
+    } catch (error) { $("investigation-result").textContent = error.message; }
+    finally { button.disabled = false; }
+  });
+  $("investigation-select").addEventListener("change", (event) => selectInvestigation(event.target.value));
+  $("explain").addEventListener("click", async () => {
+    if (!state.investigationId) return;
+    const button = $("explain"); button.disabled = true; message("paypal-status", "");
+    const box = $("explanation"); box.classList.remove("hidden"); box.textContent = "Requesting explanation…";
+    try {
+      const result = await api(`/api/investigations/${encodeURIComponent(state.investigationId)}/explanation`, { method: "POST" });
+      box.textContent = `${result.source === "GEMINI" ? "Gemini explanation" : "Deterministic fallback"} · decision remains ${result.decision}\n\n${result.explanation}`;
+    } catch (error) { box.textContent = `Explanation unavailable: ${error.message}`; }
+    finally { button.disabled = false; }
+  });
+  loadOrders().catch((error) => {
+    $("order-select").innerHTML = '<option value="">Orders unavailable</option>';
+    $("order-summary").className = "empty"; $("order-summary").textContent = `Could not load orders: ${error.message}`;
+  });
+})();
+</script>
+</body>
+</html>
