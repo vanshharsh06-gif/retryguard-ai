@@ -12,6 +12,14 @@ public record AgentProperties(
         int timeoutSeconds,
         Groq groq
 ) {
+    public AgentProperties {
+        stuckOrderMinutes = stuckOrderMinutes == 0 ? 30 : stuckOrderMinutes;
+        maxToolCalls = maxToolCalls == 0 ? 4 : maxToolCalls;
+        maxRunsPerScan = maxRunsPerScan == 0 ? 10 : maxRunsPerScan;
+        timeoutSeconds = timeoutSeconds == 0 ? 15 : timeoutSeconds;
+        groq = groq == null ? new Groq("", "", "") : groq;
+    }
+
     public record Groq(
             String apiKey,
             String model,

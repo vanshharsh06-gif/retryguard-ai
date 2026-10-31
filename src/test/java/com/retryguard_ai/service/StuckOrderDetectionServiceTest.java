@@ -52,7 +52,6 @@ class StuckOrderDetectionServiceTest {
     @Test
     void scanDoesNothingWhenAgentDisabled() {
         when(properties.enabled()).thenReturn(false);
-        when(properties.schedulerEnabled()).thenReturn(true);
 
         service.scanForStuckOrders();
 
