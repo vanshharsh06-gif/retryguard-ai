@@ -1,12 +1,10 @@
 spring:
-  config:
-    import: optional:classpath:application-local.yaml
   application:
     name: retryguard-ai
 
   datasource:
     url: ${DB_URL:jdbc:postgresql://localhost:5432/retryguard_db}
-    username: ${DB_USERNAME:postgres}
+    username: ${DB_USERNAME:retryguard_app}
     password: ${DB_PASSWORD:}
 
   jpa:
@@ -15,7 +13,7 @@ spring:
     show-sql: false
     properties:
       hibernate:
-        format_sql: true
+        format_sql: false
 
 server:
   port: 8080
@@ -32,17 +30,18 @@ retryguard:
     client-secret: ${PAYPAL_CLIENT_SECRET:}
     webhook-id: ${PAYPAL_WEBHOOK_ID:}
     api-base-url: https://api-m.sandbox.paypal.com
-    public-base-url: ${PAYPAL_PUBLIC_BASE_URL:https://subendocardial-officinally-demetrice.ngrok-free.dev}
+    public-base-url: ${PAYPAL_PUBLIC_BASE_URL:https://snitch-antennae-shield.ngrok-free.dev}
+
   ai:
     gemini:
       api-key: ${GEMINI_API_KEY:}
       model: ${GEMINI_MODEL:gemini-2.5-flash}
       endpoint: ${GEMINI_ENDPOINT:https://generativelanguage.googleapis.com/v1beta}
     agent:
-      enabled: false
+      enabled: true
       scheduler-enabled: false
       stuck-order-minutes: 30
-      max-tool-calls: 4
+      max-tool-calls: 8
       max-runs-per-scan: 10
       timeout-seconds: 60
       groq:

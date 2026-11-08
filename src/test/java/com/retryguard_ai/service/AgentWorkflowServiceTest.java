@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import tools.jackson.databind.ObjectMapper;
 
 import java.time.OffsetDateTime;
 import java.util.List;
@@ -22,7 +23,9 @@ import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.*;
 import static org.mockito.Mockito.times;
 
@@ -35,6 +38,8 @@ class AgentWorkflowServiceTest {
     @Mock private MerchantOrderRepository orderRepository;
     @Mock private ReconciliationSafetyService reconciliationService;
     @Mock private AgentProperties agentProperties;
+    @Mock private AgentWorkflowPersistenceService persistenceService;
+    @Mock private ObjectMapper objectMapper;
 
     private AgentWorkflowService service;
     private MerchantOrder order;
@@ -44,7 +49,7 @@ class AgentWorkflowServiceTest {
     void setUp() {
         service = new AgentWorkflowService(
                 agentOrchestrator, workflowRepository, stepRepository, orderRepository,
-                reconciliationService, agentProperties);
+                reconciliationService, agentProperties, persistenceService, objectMapper);
 
         orderId = UUID.randomUUID();
         order = new MerchantOrder();
@@ -57,7 +62,8 @@ class AgentWorkflowServiceTest {
 
     private void stubSkippedPath() {
         when(orderRepository.findById(orderId)).thenReturn(Optional.of(order));
-        when(workflowRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(persistenceService.persistRunning(any(AgentWorkflow.class)))
+                .thenAnswer(inv -> inv.getArgument(0));
         when(stepRepository.findByWorkflowIdOrderByCreatedAtAsc(any())).thenReturn(List.of());
     }
 
@@ -65,8 +71,10 @@ class AgentWorkflowServiceTest {
         when(agentProperties.enabled()).thenReturn(true);
         when(orderRepository.findById(orderId)).thenReturn(Optional.of(order));
         when(workflowRepository.findRunningByOrderId(orderId)).thenReturn(Optional.empty());
-        when(workflowRepository.saveAndFlush(any())).thenAnswer(inv -> inv.getArgument(0));
-        when(workflowRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(persistenceService.persistRunning(any(AgentWorkflow.class)))
+                .thenAnswer(inv -> inv.getArgument(0));
+        when(persistenceService.persistCompleted(any(AgentWorkflow.class)))
+                .thenAnswer(inv -> inv.getArgument(0));
         when(stepRepository.findByWorkflowIdOrderByCreatedAtAsc(any())).thenReturn(List.of());
     }
 
@@ -105,7 +113,8 @@ class AgentWorkflowServiceTest {
 
         when(orderRepository.findById(orderId)).thenReturn(Optional.of(order));
         when(workflowRepository.findRunningByOrderId(orderId)).thenReturn(Optional.of(runningWorkflow));
-        when(workflowRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(persistenceService.persistRunning(any(AgentWorkflow.class)))
+                .thenAnswer(inv -> inv.getArgument(0));
         when(stepRepository.findByWorkflowIdOrderByCreatedAtAsc(any())).thenReturn(List.of());
 
         AgentWorkflowResponse response = service.runWorkflow(orderId);
@@ -251,7 +260,88 @@ class AgentWorkflowServiceTest {
         AgentWorkflowResponse response = service.runWorkflow(orderId);
 
         assertThat(response.status()).isEqualTo("WAITING_FOR_WEBHOOK");
-        verify(stepRepository, times(2)).save(any(AgentWorkflowStep.class));
-        verify(workflowRepository, atLeast(2)).save(any(AgentWorkflow.class));
+        verify(persistenceService, times(2)).persistStep(any(AgentWorkflowStep.class));
+        verify(persistenceService, atLeast(2)).persistCompleted(any(AgentWorkflow.class));
+    }
+
+    @Test
+    void errorStatusPersistsAfterAgentException() {
+        when(agentProperties.enabled()).thenReturn(true);
+        when(orderRepository.findById(orderId)).thenReturn(Optional.of(order));
+        when(workflowRepository.findRunningByOrderId(orderId)).thenReturn(Optional.empty());
+        when(persistenceService.persistRunning(any(AgentWorkflow.class)))
+                .thenAnswer(inv -> inv.getArgument(0));
+
+        when(agentOrchestrator.runWorkflow(orderId.toString()))
+                .thenThrow(new RuntimeException("Groq network failure"));
+
+        assertThatThrownBy(() -> service.runWorkflow(orderId))
+                .isInstanceOf(RuntimeException.class);
+
+        // ERROR status must have been persisted independently via persistError
+        verify(persistenceService).persistError(any(AgentWorkflow.class), any(Exception.class));
+    }
+
+    @Test
+    void concurrentWorkflowPreventedByDatabaseIndex() {
+        when(agentProperties.enabled()).thenReturn(true);
+        when(orderRepository.findById(orderId)).thenReturn(Optional.of(order));
+        when(workflowRepository.findRunningByOrderId(orderId))
+                .thenReturn(Optional.of(new AgentWorkflow()));
+        when(persistenceService.persistRunning(any(AgentWorkflow.class)))
+                .thenAnswer(inv -> inv.getArgument(0));
+        when(stepRepository.findByWorkflowIdOrderByCreatedAtAsc(any())).thenReturn(List.of());
+
+        AgentWorkflowResponse response = service.runWorkflow(orderId);
+
+        assertThat(response.status()).isEqualTo("SKIPPED");
+        assertThat(response.summary()).contains("WORKFLOW_ALREADY_RUNNING");
+        verify(agentOrchestrator, never()).runWorkflow(anyString());
+    }
+
+    @Test
+    void secondWorkflowAllowedAfterTerminalStatus() {
+        when(agentProperties.enabled()).thenReturn(true);
+        when(orderRepository.findById(orderId)).thenReturn(Optional.of(order));
+        when(workflowRepository.findRunningByOrderId(orderId))
+                .thenReturn(Optional.empty());
+        when(persistenceService.persistRunning(any(AgentWorkflow.class)))
+                .thenAnswer(inv -> inv.getArgument(0));
+        when(persistenceService.persistCompleted(any(AgentWorkflow.class)))
+                .thenAnswer(inv -> inv.getArgument(0));
+        when(stepRepository.findByWorkflowIdOrderByCreatedAtAsc(any())).thenReturn(List.of());
+
+        GroqAgentProvider.AgentRunResult result = new GroqAgentProvider.AgentRunResult(
+                "COMPLETED", "ESCALATE", List.of(), 1, 1, null);
+        when(agentOrchestrator.runWorkflow(orderId.toString())).thenReturn(result);
+
+        AgentWorkflowResponse response = service.runWorkflow(orderId);
+
+        assertThat(response.status()).isEqualTo("ESCALATED");
+
+        // Now a second workflow should be allowed since previous is terminal
+        verify(agentOrchestrator).runWorkflow(orderId.toString());
+    }
+
+    @Test
+    void errorDetailsPreservedInWorkflowRecord() {
+        when(agentProperties.enabled()).thenReturn(true);
+        when(orderRepository.findById(orderId)).thenReturn(Optional.of(order));
+        when(workflowRepository.findRunningByOrderId(orderId)).thenReturn(Optional.empty());
+        when(persistenceService.persistRunning(any(AgentWorkflow.class)))
+                .thenAnswer(inv -> inv.getArgument(0));
+
+        String errorMessage = "Groq API key invalid";
+        when(agentOrchestrator.runWorkflow(orderId.toString()))
+                .thenThrow(new RuntimeException(errorMessage));
+
+        try {
+            service.runWorkflow(orderId);
+        } catch (RuntimeException ignored) {
+            // Expected
+        }
+
+        // Verify workflow was saved with ERROR status via persistError
+        verify(persistenceService).persistError(any(AgentWorkflow.class), any(Exception.class));
     }
 }

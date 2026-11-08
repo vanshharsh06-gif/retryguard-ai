@@ -11,6 +11,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.util.Currency;
+import java.util.List;
 import java.util.UUID;
 
 @Service
@@ -63,6 +64,12 @@ public class ReconciliationSafetyService {
             return ReconciliationResult.failure("MISSING_PROVIDER_ORDER_ID", "No PayPal order ID on attempt");
         }
 
+        String merchantReference = order.getMerchantOrderReference();
+        if (merchantReference == null || merchantReference.isBlank()) {
+            return ReconciliationResult.failure("MISSING_PURCHASE_UNIT",
+                    "Order has no merchant order reference; cannot match PayPal purchase unit");
+        }
+
         PaypalOrderDiagnostic diagnostic = paypalClient.diagnoseOrder(providerOrderId);
 
         if (diagnostic.httpStatus() != 200) {
@@ -77,9 +84,15 @@ public class ReconciliationSafetyService {
             return ReconciliationResult.failure("MISSING_PURCHASE_UNIT", "No purchase units in PayPal response");
         }
 
-        var pu = diagnostic.purchaseUnits().get(0);
-        String paypalCurrency = pu.currencyCode();
-        String paypalAmountStr = pu.value();
+        // Match expected purchase unit to merchant order reference when provider supplies reference_id
+        var matchedUnit = findMatchingPurchaseUnit(diagnostic.purchaseUnits(), merchantReference);
+        if (matchedUnit == null) {
+            return ReconciliationResult.failure("MISSING_PURCHASE_UNIT",
+                    "No purchase unit matches the merchant order reference: " + merchantReference);
+        }
+
+        String paypalCurrency = matchedUnit.currencyCode();
+        String paypalAmountStr = matchedUnit.value();
 
         if (paypalCurrency == null || paypalAmountStr == null) {
             return ReconciliationResult.failure("MISSING_AMOUNT_CURRENCY", "PayPal response missing amount or currency");
@@ -100,19 +113,58 @@ public class ReconciliationSafetyService {
             return ReconciliationResult.failure("AMOUNT_MISMATCH", "Amount mismatch: local=" + attempt.getAmount() + ", paypal=" + paypalAmount);
         }
 
+        // Verify actual capture record
+        String captureId = matchedUnit.captureId();
+        String captureStatus = matchedUnit.captureStatus();
+        String captureAmountStr = matchedUnit.captureAmount();
+        String captureCurrency = matchedUnit.captureCurrency();
+
+        if (captureId == null || captureStatus == null) {
+            return ReconciliationResult.failure("MISSING_CAPTURE_RECORD",
+                    "No capture record found in PayPal response");
+        }
+
+        if (!COMPLETED_STATUS.equals(captureStatus)) {
+            return ReconciliationResult.failure("CAPTURE_NOT_COMPLETED",
+                    "PayPal capture status is not COMPLETED: " + captureStatus);
+        }
+
+        if (captureAmountStr == null || captureCurrency == null) {
+            return ReconciliationResult.failure("MISSING_CAPTURE_AMOUNT_CURRENCY",
+                    "PayPal capture missing amount or currency");
+        }
+
+        BigDecimal captureAmount;
+        try {
+            captureAmount = new BigDecimal(captureAmountStr);
+        } catch (NumberFormatException e) {
+            return ReconciliationResult.failure("INVALID_CAPTURE_AMOUNT_FORMAT",
+                    "PayPal capture amount is not a valid decimal");
+        }
+
+        // Use actual capture amount and currency for final verification
+        if (attempt.getAmount().compareTo(captureAmount) != 0) {
+            return ReconciliationResult.failure("CAPTURE_AMOUNT_MISMATCH",
+                    "Capture amount mismatch: local=" + attempt.getAmount() + ", capture=" + captureAmount);
+        }
+
+        if (!normalizeCurrency(captureCurrency).equals(normalizeCurrency(attempt.getCurrency()))) {
+            return ReconciliationResult.failure("CAPTURE_CURRENCY_MISMATCH",
+                    "Capture currency mismatch: local=" + attempt.getCurrency() + ", capture=" + captureCurrency);
+        }
+
+        // Verify capture ID against locally stored capture reference when available
+        String attemptCaptureRef = attempt.getProviderCaptureReference();
+        if (attemptCaptureRef != null && !attemptCaptureRef.isBlank()) {
+            if (!attemptCaptureRef.equals(captureId)) {
+                return ReconciliationResult.failure("CAPTURE_REFERENCE_MISMATCH",
+                    "Capture reference mismatch: attempt=" + attemptCaptureRef + ", capture=" + captureId);
+            }
+        }
+
         // Additional verification: ensure the order intent is CAPTURE
         if (!"CAPTURE".equals(diagnostic.intent())) {
             return ReconciliationResult.failure("INVALID_ORDER_INTENT", "PayPal order intent is not CAPTURE: " + diagnostic.intent());
-        }
-
-        // Verify capture reference matches if available on both sides
-        String attemptCaptureRef = attempt.getProviderCaptureReference();
-        if (attemptCaptureRef != null && !attemptCaptureRef.isBlank()) {
-            String captureRefFromPaypal = diagnostic.purchaseUnits().get(0).value();
-            if (!attemptCaptureRef.equals(captureRefFromPaypal)) {
-                return ReconciliationResult.failure("CAPTURE_REFERENCE_MISMATCH",
-                    "Capture reference mismatch: attempt=" + attemptCaptureRef + ", paypal=" + captureRefFromPaypal);
-            }
         }
 
         order.setOrderStatus(MerchantOrder.OrderStatus.PAID);
@@ -125,6 +177,32 @@ public class ReconciliationSafetyService {
         }
 
         return ReconciliationResult.success("RECONCILED", "Order reconciled to PAID based on verified PayPal COMPLETED capture");
+    }
+
+    private PaypalClient.PaypalOrderUnitDiagnostic findMatchingPurchaseUnit(
+            List<PaypalClient.PaypalOrderUnitDiagnostic> units, String merchantReference) {
+        if (units == null || units.isEmpty()) {
+            return null;
+        }
+
+        // A merchant reference is required to reliably associate a purchase unit with an order.
+        if (merchantReference == null || merchantReference.isBlank()) {
+            return null;
+        }
+
+        List<PaypalClient.PaypalOrderUnitDiagnostic> matches = units.stream()
+                .filter(unit -> merchantReference.equals(unit.referenceId()))
+                .toList();
+
+        if (matches.isEmpty()) {
+            // No purchase unit carries the expected merchant reference.
+            return null;
+        }
+        if (matches.size() > 1) {
+            // Multiple purchase units carry the same merchant reference: ambiguous.
+            return null;
+        }
+        return matches.get(0);
     }
 
     private String normalizeCurrency(String currency) {

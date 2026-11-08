@@ -9,6 +9,8 @@ import com.retryguard_ai.dto.AutopsyFinding.Severity;
 import com.retryguard_ai.dto.InvestigationResponse.AttemptEvidence;
 import com.retryguard_ai.dto.InvestigationResponse.EventEvidence;
 import com.retryguard_ai.dto.InvestigationResponse.EvidenceSnapshot;
+import com.retryguard_ai.dto.InvestigationResponse.PaymentStateClassification;
+import com.retryguard_ai.dto.InvestigationResponse.TimelineEntry;
 import com.retryguard_ai.dto.InvestigationHistoryResponse;
 import com.retryguard_ai.dto.InvestigationResponse;
 import com.retryguard_ai.entity.Investigation;
@@ -37,7 +39,11 @@ import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 @Service
 public class InvestigationService {
@@ -87,6 +93,14 @@ public class InvestigationService {
 
         DecisionResult result = decide(order, attempts, attemptEvidence);
         List<AutopsyFinding> findings = buildFindings(order, attempts, attemptEvidence, result);
+
+        // Payment-state classification per attempt
+        List<PaymentStateClassification> classifications = classifyPaymentStates(
+                attempts, attemptEvidence);
+
+        // Timeline reconstruction from all evidence
+        List<TimelineEntry> timeline = reconstructTimeline(order, attempts, events, now);
+
         Investigation previous = investigationRepository
                 .findFirstByOrder_IdOrderByCreatedAtDescIdDesc(orderId).orElse(null);
 
@@ -115,7 +129,7 @@ public class InvestigationService {
         history.setCreatedAt(now);
         investigationHistoryRepository.save(history);
 
-        return toResponse(saved);
+        return toResponse(saved, snapshot, classifications, timeline);
     }
 
     @Transactional(readOnly = true)
@@ -163,6 +177,14 @@ public class InvestigationService {
                     investigation.getEvidenceSnapshot(), EvidenceSnapshot.class);
             List<AutopsyFinding> findings = objectMapper.readValue(
                     investigation.getFindings(), new TypeReference<>() { });
+            // Reconstruct classifications and timeline from stored snapshot
+            List<PaymentStateClassification> classifications = classifyPaymentStates(
+                    snapshot.attempts().stream()
+                            .map(a -> toPaymentAttempt(a))
+                            .toList(),
+                    snapshot.attempts());
+            List<TimelineEntry> timeline = reconstructTimelineFromSnapshot(
+                    snapshot, investigation.getCreatedAt());
             return new InvestigationResponse(
                     investigation.getId(),
                     investigation.getOrder().getId(),
@@ -172,10 +194,353 @@ public class InvestigationService {
                     investigation.getExplanation(),
                     snapshot,
                     findings,
+                    classifications,
+                    timeline,
                     investigation.getCreatedAt());
         } catch (JacksonException exception) {
             throw new IllegalStateException("Stored investigation data is invalid.", exception);
         }
+    }
+
+    private InvestigationResponse toResponse(
+            Investigation investigation,
+            EvidenceSnapshot snapshot,
+            List<PaymentStateClassification> classifications,
+            List<TimelineEntry> timeline) {
+        try {
+            List<AutopsyFinding> findings = objectMapper.readValue(
+                    investigation.getFindings(), new TypeReference<>() { });
+            return new InvestigationResponse(
+                    investigation.getId(),
+                    investigation.getOrder().getId(),
+                    investigation.getDecision().name(),
+                    investigation.getDecisionReason(),
+                    investigation.getRulesVersion(),
+                    investigation.getExplanation(),
+                    snapshot,
+                    findings,
+                    classifications,
+                    timeline,
+                    investigation.getCreatedAt());
+        } catch (JacksonException exception) {
+            throw new IllegalStateException("Stored investigation data is invalid.", exception);
+        }
+    }
+
+    private List<AutopsyFinding> findingsFromJson(Investigation investigation) {
+        try {
+            return objectMapper.readValue(
+                    investigation.getFindings(), new TypeReference<>() { });
+        } catch (JacksonException exception) {
+            throw new IllegalStateException("Stored investigation data is invalid.", exception);
+        }
+    }
+
+    /**
+     * Reconstructs a minimal PaymentAttempt from AttemptEvidence for classification purposes.
+     * Only provider and paymentStatus are needed; these are stored in the snapshot.
+     */
+    private PaymentAttempt toPaymentAttempt(AttemptEvidence evidence) {
+        PaymentAttempt attempt = new PaymentAttempt();
+        attempt.setId(evidence.paymentAttemptId());
+        attempt.setProvider(evidence.provider());
+        attempt.setPaymentStatus(
+                evidence.paymentStatus() == null
+                        ? null
+                        : PaymentAttempt.PaymentStatus.valueOf(evidence.paymentStatus()));
+        return attempt;
+    }
+
+    /**
+     * Reconstructs a timeline from a stored EvidenceSnapshot for investigation retrieval.
+     * All events in the snapshot are already verified and stored; no new events are created.
+     */
+    private List<TimelineEntry> reconstructTimelineFromSnapshot(
+            EvidenceSnapshot snapshot, OffsetDateTime investigationCreatedAt) {
+        List<TimelineEntry> timeline = new ArrayList<>();
+        OffsetDateTime now = investigationCreatedAt != null
+                ? investigationCreatedAt
+                : OffsetDateTime.now();
+
+        // Attempt entries from snapshot
+        for (AttemptEvidence attemptEvidence : snapshot.attempts()) {
+            OffsetDateTime attemptTime = attemptEvidence.createdAt() != null
+                    ? attemptEvidence.createdAt()
+                    : investigationCreatedAt;
+            timeline.add(new TimelineEntry(
+                    attemptTime,
+                    attemptEvidence.createdAt(),
+                    "PAYMENT_ATTEMPT",
+                    "ATTEMPT_STATUS_" + (attemptEvidence.paymentStatus() != null
+                            ? attemptEvidence.paymentStatus() : "UNKNOWN"),
+                    "Payment attempt " + attemptEvidence.paymentAttemptId()
+                            + " status: " + attemptEvidence.paymentStatus(),
+                    "PAYMENT_ATTEMPT"));
+
+            // Event entries from snapshot
+            for (EventEvidence event : attemptEvidence.events()) {
+                OffsetDateTime eventTimestamp = event.effectiveEvidenceAt() != null
+                        ? event.effectiveEvidenceAt()
+                        : event.receivedAt();
+                timeline.add(new TimelineEntry(
+                        eventTimestamp,
+                        event.receivedAt(),
+                        (event.provider() != null ? event.provider() : "UNKNOWN")
+                                + ":" + (event.sourceType() != null ? event.sourceType() : "UNKNOWN")
+                                + ":" + (event.verificationStatus() != null
+                                ? event.verificationStatus() : "UNKNOWN"),
+                        event.eventType(),
+                        event.eventType(),
+                        "PAYMENT_EVENT"));
+            }
+        }
+
+        // Sort by timestamp, then received_at as tie-breaker
+        timeline.sort(Comparator
+                .comparing((TimelineEntry t) -> t.timestamp(),
+                        Comparator.nullsLast(Comparator.naturalOrder()))
+                .thenComparing(TimelineEntry::receivedAt,
+                        Comparator.nullsLast(Comparator.naturalOrder()))
+                .thenComparing(TimelineEntry::eventType));
+
+        return List.copyOf(timeline);
+    }
+
+    /**
+     * Classifies each payment attempt into a deterministic state based on available evidence.
+     * States: SUCCESSFUL, FAILED, PENDING, CONFLICTING, UNCERTAIN.
+     */
+    private List<PaymentStateClassification> classifyPaymentStates(
+            List<PaymentAttempt> attempts,
+            List<AttemptEvidence> attemptEvidence) {
+        List<PaymentStateClassification> classifications = new ArrayList<>();
+
+        for (int index = 0; index < attempts.size(); index++) {
+            PaymentAttempt attempt = attempts.get(index);
+            AttemptEvidence snapshot = attemptEvidence.get(index);
+            List<EventEvidence> events = snapshot.events();
+            List<EventEvidence> trusted = events.stream()
+                    .filter(EventEvidence::trustedPayPalEvidence)
+                    .toList();
+
+            List<EventEvidence> denials = trusted.stream()
+                    .filter(event -> DENIED_EVENT.equals(event.eventType()))
+                    .toList();
+            List<EventEvidence> completions = trusted.stream()
+                    .filter(event -> COMPLETED_EVENT.equals(event.eventType()))
+                    .toList();
+            List<EventEvidence> pendings = trusted.stream()
+                    .filter(event -> PENDING_EVENT.equals(event.eventType()))
+                    .toList();
+
+            boolean hasDenial = !denials.isEmpty();
+            boolean hasCompletion = !completions.isEmpty();
+            boolean hasPending = !pendings.isEmpty();
+            List<UUID> evidenceIds = events.stream()
+                    .map(EventEvidence::eventId)
+                    .toList();
+
+            String state;
+            String reason;
+
+            if (hasDenial && hasCompletion) {
+                // Only flag conflict when denial and completion refer to different captures
+                // or when they genuinely contradict on the same capture reference.
+                Set<String> denialCaptureRefs = denials.stream()
+                        .map(EventEvidence::captureReference)
+                        .filter(Objects::nonNull)
+                        .collect(Collectors.toSet());
+                Set<String> completionCaptureRefs = completions.stream()
+                        .map(EventEvidence::captureReference)
+                        .filter(Objects::nonNull)
+                        .collect(Collectors.toSet());
+                boolean capturesOverlap = denialCaptureRefs.stream()
+                        .anyMatch(completionCaptureRefs::contains);
+                if (denialCaptureRefs.isEmpty() && completionCaptureRefs.isEmpty()) {
+                    // No capture references available; preserve conservative reconciliation
+                    state = "CONFLICTING";
+                    reason = "Verified provider evidence contains both denial and completion for this attempt; capture references unavailable";
+                } else if (!capturesOverlap) {
+                    // Different capture references = genuinely contradictory evidence
+                    state = "CONFLICTING";
+                    reason = "Verified provider denial and completion reference different capture IDs; contradictory evidence";
+                } else {
+                    // Same capture reference: not necessarily contradictory (e.g., delayed
+                    // state transition); classify as UNCERTAIN
+                    state = "UNCERTAIN";
+                    reason = "Verified provider denial and completion reference the same capture; conflicting terminal evidence requires reconciliation";
+                }
+            } else if (hasCompletion) {
+                state = "SUCCESSFUL";
+                reason = "Verified provider completion evidence exists for this attempt";
+            } else if (hasPending && !hasDenial && !hasCompletion) {
+                state = "PENDING";
+                reason = "Verified provider pending evidence exists; no terminal outcome yet";
+            } else if (hasDenial && !hasCompletion && !hasPending) {
+                // Check freshness for denial
+                EventEvidence latestDenial = denials.stream()
+                        .max(Comparator.comparing(EventEvidence::effectiveEvidenceAt,
+                                Comparator.nullsLast(Comparator.naturalOrder())))
+                        .orElse(null);
+                boolean freshDenial = latestDenial != null
+                        && "FRESH".equals(latestDenial.freshness());
+                state = freshDenial ? "FAILED" : "UNCERTAIN";
+                reason = freshDenial
+                        ? "Fresh, verified provider denial evidence exists for this attempt"
+                        : "Denial evidence exists but is stale or unverified; cannot confirm failure";
+            } else if (attempt.getPaymentStatus() == PaymentAttempt.PaymentStatus.SUCCEEDED
+                    && !hasDenial && !hasCompletion) {
+                state = "UNCERTAIN";
+                reason = "Attempt is marked SUCCEEDED locally but no verified provider evidence confirms completion";
+                evidenceIds = evidenceIds.stream()
+                        .filter(id -> !id.equals(attempt.getId()))
+                        .collect(Collectors.toList());
+            } else if (attempt.getPaymentStatus() == PaymentAttempt.PaymentStatus.FAILED
+                    && !hasDenial && !hasCompletion && !hasPending) {
+                state = "UNCERTAIN";
+                reason = "Attempt is marked FAILED locally but no verified provider terminal evidence exists";
+            } else if (attempt.getPaymentStatus() == PaymentAttempt.PaymentStatus.PENDING
+                    && !hasDenial && !hasCompletion && !hasPending) {
+                state = "PENDING";
+                reason = "Attempt is pending locally; no verified terminal provider evidence yet";
+            } else if (attempt.getPaymentStatus() == PaymentAttempt.PaymentStatus.CREATED
+                    && events.isEmpty()) {
+                state = "UNCERTAIN";
+                reason = "No payment events recorded for this attempt; evidence is missing";
+            } else {
+                state = "UNCERTAIN";
+                reason = "Insufficient verified provider evidence to determine a terminal state";
+            }
+
+            classifications.add(new PaymentStateClassification(
+                    attempt.getId(),
+                    state,
+                    reason,
+                    List.copyOf(evidenceIds)));
+        }
+
+        return List.copyOf(classifications);
+    }
+
+    /**
+     * Reconstructs the payment timeline from order records, attempts, and events.
+     * Events are sorted by effective evidence time (provider timestamp when available,
+     * received_at otherwise), preserving timestamps and sources.
+     * No events are invented; only actual recorded evidence appears.
+     * Invalid and future timestamps are handled conservatively.
+     */
+    private List<TimelineEntry> reconstructTimeline(
+            MerchantOrder order,
+            List<PaymentAttempt> attempts,
+            List<PaymentEvent> events,
+            OffsetDateTime now) {
+        List<TimelineEntry> timeline = new ArrayList<>();
+
+        // Order creation
+        if (order.getCreatedAt() != null) {
+            timeline.add(new TimelineEntry(
+                    order.getCreatedAt(),
+                    order.getCreatedAt(),
+                    "MERCHANT_ORDER",
+                    "ORDER_CREATED",
+                    "Merchant order created: " + order.getMerchantOrderReference(),
+                    "ORDER"));
+        }
+
+        // Order status updates
+        if (order.getUpdatedAt() != null) {
+            timeline.add(new TimelineEntry(
+                    order.getUpdatedAt(),
+                    order.getUpdatedAt(),
+                    "MERCHANT_ORDER",
+                    "ORDER_STATUS_" + order.getOrderStatus().name(),
+                    "Merchant order status: " + order.getOrderStatus().name(),
+                    "ORDER"));
+        }
+
+        // Attempt creations and statuses
+        for (PaymentAttempt attempt : attempts) {
+            OffsetDateTime attemptEffective = attempt.getCreatedAt() != null
+                    ? attempt.getCreatedAt()
+                    : OffsetDateTime.now();
+            timeline.add(new TimelineEntry(
+                    attemptEffective,
+                    attempt.getCreatedAt(),
+                    "PAYMENT_ATTEMPT",
+                    "ATTEMPT_CREATED",
+                    "Payment attempt created for order " + order.getMerchantOrderReference()
+                            + " (provider: " + attempt.getProvider() + ")",
+                    "PAYMENT_ATTEMPT"));
+
+            if (attempt.getUpdatedAt() != null
+                    && !attempt.getUpdatedAt().equals(attempt.getCreatedAt())) {
+                timeline.add(new TimelineEntry(
+                        attempt.getUpdatedAt(),
+                        attempt.getUpdatedAt(),
+                        "PAYMENT_ATTEMPT",
+                        "ATTEMPT_STATUS_" + attempt.getPaymentStatus().name(),
+                        "Payment attempt status: " + attempt.getPaymentStatus().name(),
+                        "PAYMENT_ATTEMPT"));
+            }
+        }
+
+        // Events sorted by effective evidence time, then received_at as tie-breaker
+        List<PaymentEvent> sortedEvents = events.stream()
+                .sorted(Comparator
+                        .comparing((PaymentEvent e) -> effectiveEventTime(e, now),
+                                Comparator.nullsLast(Comparator.naturalOrder()))
+                        .thenComparing(PaymentEvent::getReceivedAt,
+                                Comparator.nullsLast(Comparator.naturalOrder()))
+                        .thenComparing(PaymentEvent::getId))
+                .toList();
+
+        for (PaymentEvent event : sortedEvents) {
+            OffsetDateTime effectiveTime = effectiveEventTime(event, now);
+            OffsetDateTime receivedAt = event.getReceivedAt();
+            OffsetDateTime timestamp = effectiveTime != null ? effectiveTime : receivedAt;
+            String source = event.getProvider() + ":" + event.getSourceType().name()
+                    + ":" + event.getVerificationStatus().name();
+            String description = event.getEventType();
+            if (event.getProviderEventId() != null) {
+                description += " (provider event: " + event.getProviderEventId() + ")";
+            }
+            timeline.add(new TimelineEntry(
+                    timestamp,
+                    receivedAt,
+                    source,
+                    event.getEventType(),
+                    description,
+                    "PAYMENT_EVENT"));
+        }
+
+        // Sort timeline by effective timestamp, then received_at as deterministic tie-breaker
+        timeline.sort(Comparator
+                .comparing((TimelineEntry t) -> t.timestamp(), Comparator.nullsLast(Comparator.naturalOrder()))
+                .thenComparing(TimelineEntry::receivedAt, Comparator.nullsLast(Comparator.naturalOrder()))
+                .thenComparing(TimelineEntry::eventType));
+
+        return List.copyOf(timeline);
+    }
+
+    /**
+     * Returns the effective evidence timestamp for an event:
+     * provider create_time when valid and not in the future,
+     * null otherwise (caller should fall back to received_at).
+     */
+    private OffsetDateTime effectiveEventTime(PaymentEvent event, OffsetDateTime now) {
+        if (event == null) {
+            return null;
+        }
+        if (event.getProvider() != null
+                && event.getProvider().equals(PAYPAL_PROVIDER)
+                && event.getSourceType() == PaymentEvent.SourceType.PROVIDER
+                && event.getVerificationStatus() == PaymentEvent.VerificationStatus.VERIFIED) {
+            OffsetDateTime providerTime = parseProviderTime(event.getPayload());
+            if (providerTime != null && !providerTime.isAfter(now)) {
+                return providerTime;
+            }
+        }
+        return null;
     }
 
     private List<AutopsyFinding> buildFindings(
@@ -242,10 +607,10 @@ public class InvestigationService {
                         .map(event -> new EvidenceReference(EvidenceType.PAYMENT_EVENT, event.eventId())))
                 .toList();
         if (!staleEvidence.isEmpty()) {
-            findings.add(finding(Code.STALE_EVIDENCE, "Provider evidence is stale or undated",
-                    "Verified provider evidence is older than the freshness window, malformed, or has a future timestamp.",
+            findings.add(finding(Code.STALE_EVIDENCE, "Provider evidence is stale",
+                    "Verified provider evidence exists but is older than the freshness threshold (" + FRESHNESS_THRESHOLD_MINUTES + " minutes).",
                     RootCauseCategory.STALE_EVIDENCE, Severity.MEDIUM, staleEvidence,
-                    "Obtain or wait for current verified provider evidence before evaluating recovery.", true));
+                    "Wait for fresh verified terminal provider evidence before making a retry decision.", true));
         }
 
         List<EvidenceReference> unverifiedEvidence = evidence.stream()
@@ -254,10 +619,10 @@ public class InvestigationService {
                         .map(event -> new EvidenceReference(EvidenceType.PAYMENT_EVENT, event.eventId())))
                 .toList();
         if (!unverifiedEvidence.isEmpty()) {
-            findings.add(finding(Code.UNVERIFIED_EVIDENCE, "Event is not trusted provider evidence",
-                    "One or more stored events are simulated, unverified, or from a provider/source not accepted by the deterministic rules.",
+            findings.add(finding(Code.UNVERIFIED_EVIDENCE, "Unverified payment event",
+                    "A payment event exists but is not from a verified PayPal provider source.",
                     RootCauseCategory.UNVERIFIED_EVIDENCE, Severity.MEDIUM, unverifiedEvidence,
-                    "Use the verified provider webhook flow and do not treat these events as proof of payment outcome.", true));
+                    "Do not act on unverified provider evidence; wait for verified terminal outcome.", true));
         }
 
         List<EvidenceReference> missingEvidence = new ArrayList<>();
@@ -265,13 +630,14 @@ public class InvestigationService {
             missingEvidence.add(new EvidenceReference(EvidenceType.ORDER, order.getId()));
         } else {
             for (int index = 0; index < attempts.size(); index++) {
-                boolean hasTerminalOutcome = evidence.get(index).events().stream()
-                        .anyMatch(event -> event.trustedPayPalEvidence()
-                                && (DENIED_EVENT.equals(event.eventType())
-                                || COMPLETED_EVENT.equals(event.eventType())));
-                if (!hasTerminalOutcome) {
-                    missingEvidence.add(new EvidenceReference(
-                            EvidenceType.PAYMENT_ATTEMPT, attempts.get(index).getId()));
+                PaymentAttempt attempt = attempts.get(index);
+                List<EventEvidence> attemptEvents = evidence.get(index).events();
+                boolean hasTrustedTerminal = attemptEvents.stream()
+                        .filter(EventEvidence::trustedPayPalEvidence)
+                        .anyMatch(event -> DENIED_EVENT.equals(event.eventType())
+                                || COMPLETED_EVENT.equals(event.eventType()));
+                if (!hasTrustedTerminal) {
+                    missingEvidence.add(new EvidenceReference(EvidenceType.PAYMENT_ATTEMPT, attempt.getId()));
                 }
             }
         }
@@ -285,26 +651,28 @@ public class InvestigationService {
         }
 
         List<EvidenceReference> confirmedEvidence = new java.util.ArrayList<>();
-        if (order.getOrderStatus() == MerchantOrder.OrderStatus.PAID) {
-            confirmedEvidence.add(new EvidenceReference(EvidenceType.ORDER, order.getId()));
-        }
+        // Only verified provider completion evidence counts as payment-confirmed.
+        // Local PAID/SUCCEEDED status alone does not prove provider completion.
+        boolean hasVerifiedCompletion = false;
         for (int index = 0; index < attempts.size(); index++) {
             PaymentAttempt attempt = attempts.get(index);
-            if (attempt.getPaymentStatus() == PaymentAttempt.PaymentStatus.SUCCEEDED) {
-                confirmedEvidence.add(new EvidenceReference(EvidenceType.PAYMENT_ATTEMPT, attempt.getId()));
-            }
+            int sizeBefore = confirmedEvidence.size();
             evidence.get(index).events().stream()
                     .filter(event -> event.trustedPayPalEvidence()
                             && COMPLETED_EVENT.equals(event.eventType()))
                     .map(event -> new EvidenceReference(EvidenceType.PAYMENT_EVENT, event.eventId()))
                     .forEach(confirmedEvidence::add);
+            if (confirmedEvidence.size() > sizeBefore) {
+                hasVerifiedCompletion = true;
+            }
         }
-        if (!confirmedEvidence.isEmpty()) {
+        if (hasVerifiedCompletion && !confirmedEvidence.isEmpty()) {
             findings.add(finding(Code.PAYMENT_CONFIRMED, "Payment completion is recorded",
-                    "The merchant order, attempt, or verified provider event records a completed payment outcome.",
+                    "Verified provider completion evidence records a completed payment outcome.",
                     RootCauseCategory.CONFIRMED_PAYMENT, Severity.INFO, confirmedEvidence,
                     "Verify the merchant's fulfillment and accounting records; do not create another charge.", true));
         }
+
         return List.copyOf(findings);
     }
 
@@ -337,6 +705,7 @@ public class InvestigationService {
                     attempt.getId(),
                     attempt.getProvider(),
                     attempt.getPaymentStatus() == null ? null : attempt.getPaymentStatus().name(),
+                    attempt.getCreatedAt(),
                     eventEvidence);
         }).toList();
     }
@@ -376,7 +745,9 @@ public class InvestigationService {
                 effectiveAt,
                 timestampSource,
                 freshness,
-                trusted);
+                trusted,
+                event.getProviderEventId(),
+                nestedCaptureReference(event.getPayload()));
     }
 
     private DecisionResult decide(
@@ -405,10 +776,36 @@ public class InvestigationService {
                     .anyMatch(event -> DENIED_EVENT.equals(event.eventType()));
             boolean hasAttemptCompletion = trusted.stream()
                     .anyMatch(event -> COMPLETED_EVENT.equals(event.eventType()));
+            List<EventEvidence> denials = trusted.stream()
+                    .filter(event -> DENIED_EVENT.equals(event.eventType()))
+                    .toList();
+            List<EventEvidence> completions = trusted.stream()
+                    .filter(event -> COMPLETED_EVENT.equals(event.eventType()))
+                    .toList();
             hasDenied |= hasAttemptDenial;
             hasCompleted |= hasAttemptCompletion;
+            // Only flag conflict when denial and completion refer to different captures
+            // or when they genuinely contradict on the same capture reference.
             if (hasAttemptDenial && hasAttemptCompletion) {
-                hasConflict = true;
+                Set<String> denialCaptureRefs = denials.stream()
+                        .map(EventEvidence::captureReference)
+                        .filter(Objects::nonNull)
+                        .collect(Collectors.toSet());
+                Set<String> completionCaptureRefs = completions.stream()
+                        .map(EventEvidence::captureReference)
+                        .filter(Objects::nonNull)
+                        .collect(Collectors.toSet());
+                boolean capturesOverlap = denialCaptureRefs.stream()
+                        .anyMatch(completionCaptureRefs::contains);
+                if (denialCaptureRefs.isEmpty() && completionCaptureRefs.isEmpty()) {
+                    // No capture references available; preserve conservative reconciliation
+                    hasConflict = true;
+                } else if (!capturesOverlap) {
+                    // Different capture references = genuinely contradictory evidence
+                    hasConflict = true;
+                }
+                // Same capture reference: not necessarily contradictory (e.g., delayed
+                // state transition); do not flag as conflict.
             }
             if ((attempt.getPaymentStatus() == PaymentAttempt.PaymentStatus.FAILED
                     && hasAttemptCompletion)
@@ -416,12 +813,6 @@ public class InvestigationService {
                     && hasAttemptDenial)) {
                 hasConflict = true;
             }
-            List<EventEvidence> denials = trusted.stream()
-                    .filter(event -> DENIED_EVENT.equals(event.eventType()))
-                    .sorted(Comparator.comparing(
-                            EventEvidence::effectiveEvidenceAt,
-                            Comparator.nullsLast(Comparator.naturalOrder())))
-                    .toList();
             EventEvidence latestDenial = denials.isEmpty() ? null : denials.get(denials.size() - 1);
 
             if (attempt.getPaymentStatus() != PaymentAttempt.PaymentStatus.FAILED
@@ -530,6 +921,29 @@ public class InvestigationService {
         try {
             return OffsetDateTime.parse(value);
         } catch (DateTimeParseException ignored) {
+            return null;
+        }
+    }
+
+    /**
+     * Extracts the PayPal capture reference (resource.id) from a webhook event payload.
+     * Returns null when the payload does not contain a resource.id, e.g., for events
+     * that do not carry a capture identifier.
+     */
+    private String nestedCaptureReference(String payload) {
+        try {
+            JsonNode root = objectMapper.readTree(payload);
+            JsonNode resource = root == null ? null : root.get("resource");
+            if (resource == null || !resource.isObject()) {
+                return null;
+            }
+            JsonNode idNode = resource.get("id");
+            if (idNode == null || !idNode.isTextual()) {
+                return null;
+            }
+            String id = idNode.asText();
+            return id.isBlank() ? null : id;
+        } catch (JacksonException ignored) {
             return null;
         }
     }

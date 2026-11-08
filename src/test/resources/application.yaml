@@ -1,0 +1,37 @@
+spring:
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/retryguard_db}
+    username: ${DB_USERNAME:postgres}
+    password: ${DB_PASSWORD:}
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: false
+
+retryguard:
+  paypal:
+    client-id: ${PAYPAL_CLIENT_ID:}
+    client-secret: ${PAYPAL_CLIENT_SECRET:}
+    webhook-id: ${PAYPAL_WEBHOOK_ID:}
+    api-base-url: https://api-m.sandbox.paypal.com
+    public-base-url: ${PAYPAL_PUBLIC_BASE_URL:http://localhost:8080}
+  ai:
+    gemini:
+      api-key: ${GEMINI_API_KEY:}
+      model: ${GEMINI_MODEL:gemini-2.5-flash}
+      endpoint: ${GEMINI_ENDPOINT:https://generativelanguage.googleapis.com/v1beta}
+    agent:
+      enabled: false
+      scheduler-enabled: false
+      stuck-order-minutes: 30
+      max-tool-calls: 4
+      max-runs-per-scan: 10
+      timeout-seconds: 60
+      groq:
+        api-key: ${GROQ_API_KEY:}
+        model: ${GROQ_MODEL:openai/gpt-oss-120b}
+        base-url: ${GROQ_BASE_URL:https://api.groq.com/openai/v1}

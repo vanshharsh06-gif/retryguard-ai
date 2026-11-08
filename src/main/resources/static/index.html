@@ -87,224 +87,477 @@
         <div class="subhead"><h3>Investigation history</h3><span id="history-label" class="muted small"></span></div>
         <div id="history" class="empty">Select an investigation to view its audit history.</div>
       </section>
+      <section class="card">
+        <div class="subhead"><h3>Agentic AI Workflow</h3></div>
+        <div class="muted small">Run the Groq agentic workflow for the selected order. The agent uses read-only diagnostic tools and makes advisory recommendations only.</div>
+        <div id="workflow-order-select" class="empty" style="margin-top:10px">Select an order to start a workflow</div>
+        <div class="actions" style="margin-top:10px"><button id="start-workflow" class="mint" type="button" disabled>Start Agent Workflow</button></div>
+        <div id="workflow-status" class="status muted" style="margin:12px 0;"></div>
+        <div id="workflow-details" class="empty" style="margin-top:12px; display:none"></div>
+        <button id="refresh-workflow" class="secondary" type="button" style="margin-top:10px; display:none">Refresh Workflow</button>
+      </section>
     </section>
   </div>
 </main>
-<footer>Demo interface only. Authentication and authorization are not implemented; run behind trusted infrastructure. Sandbox credentials remain server-side and are never sent to this page.</footer>
+<footer>Demo interface only. Basic authentication and webhook signature verification are configured; run behind trusted infrastructure. Sandbox credentials remain server-side and are never sent to this page.</footer>
 <script>
-(() => {
-  "use strict";
-  const $ = (id) => document.getElementById(id);
-  const state = { orderId: "", attemptId: "", investigationId: "", orders: [] };
-  const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
-  }[char]));
-  const message = (id, text, kind = "") => {
-    const node = $(id); node.textContent = text; node.className = `status ${kind}`.trim();
-  };
-  async function api(path, options = {}) {
-    const response = await fetch(path, {
-      ...options,
-      headers: { ...(options.body ? { "Content-Type": "application/json" } : {}), ...(options.headers || {}) }
-    });
-    const text = await response.text();
-    let body = null;
-    if (text) { try { body = JSON.parse(text); } catch { body = text; } }
-    if (!response.ok) {
-      const detail = body && typeof body === "object" ? (body.detail || body.title) : body;
-      throw new Error(detail || `Request failed (${response.status}).`);
+  (() => {
+    "use strict";
+    const $ = (id) => document.getElementById(id);
+    const state = {
+      orderId: "", attemptId: "", investigationId: "", orders: [],
+      workflowId: "", workflowStatus: "", workflowStepCount: 0,
+      workflowResult: "", workflowSteps: [], workflowRecommendation: ""
+    };
+    const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
+      "&": "&", "<": "<", ">": ">", '"': "&quot;", "'": "&apos;"
+    }[char]));
+    const getCsrfToken = () => {
+      const match = document.cookie.match(/(?:^|;\s*)XSRF-TOKEN=([^;]*)/);
+      return match ? decodeURIComponent(match[1]) : null;
+    };
+    const message = (id, text, kind = "") => {
+      const node = $(id); node.textContent = text; node.className = `status ${kind}`.trim();
+    };
+    async function api(path, options = {}) {
+      const mutating = options.method && ["POST", "PUT", "PATCH", "DELETE"].includes(options.method.toUpperCase());
+      const headers = { ...(options.body ? { "Content-Type": "application/json" } : {}), ...(options.headers || {}) };
+      if (mutating) {
+        const token = getCsrfToken();
+        if (token) headers["X-XSRF-TOKEN"] = token;
+      }
+      const response = await fetch(path, {
+        ...options,
+        headers: headers
+      });
+      const text = await response.text();
+      let body = null;
+      if (text) { try { body = JSON.parse(text); } catch { body = text; } }
+      if (!response.ok) {
+        const detail = body && typeof body === "object" ? (body.detail || body.title) : body;
+        throw new Error(detail || `Request failed (${response.status}).`);
+      }
+      return body;
     }
-    return body;
-  }
-  const time = (value) => value ? new Date(value).toLocaleString() : "Time unavailable";
-  const idShort = (id) => id ? `${id.slice(0, 8)}…` : "unknown";
+    const time = (value) => value ? new Date(value).toLocaleString() : "Time unavailable";
+    const idShort = (id) => id ? `${id.slice(0, 8)}…` : "unknown";
 
-  async function loadOrders(preferredId = state.orderId) {
-    const select = $("order-select");
-    select.innerHTML = '<option value="">Loading…</option>';
-    const orders = await api("/api/orders");
-    state.orders = Array.isArray(orders) ? orders : [];
-    select.innerHTML = '<option value="">Select an order…</option>' + state.orders.map((order) =>
-      `<option value="${escapeHtml(order.id)}">${escapeHtml(order.merchantOrderReference)} · ${escapeHtml(order.amount)} ${escapeHtml(order.currency)} · ${escapeHtml(order.orderStatus)}</option>`
-    ).join("");
-    if (!state.orders.length) {
-      $("order-summary").className = "empty"; $("order-summary").textContent = "No orders yet. Create a merchant order to begin.";
-      state.orderId = ""; return;
-    }
-    const selected = state.orders.some((order) => order.id === preferredId) ? preferredId : state.orders[0].id;
-    select.value = selected; await selectOrder(selected);
-  }
-  async function selectOrder(orderId) {
-    state.orderId = orderId || ""; state.attemptId = ""; state.investigationId = "";
-    $("explain").disabled = true; $("explanation").classList.add("hidden");
-    $("investigation-result").className = "empty";
-    $("history").className = "empty"; $("history").textContent = "Select an investigation to view its audit history.";
-    if (!orderId) return;
-    const order = state.orders.find((item) => item.id === orderId);
-    if (order) {
-      $("order-summary").className = "order-meta";
-      $("order-summary").innerHTML = [
-        ["Status", order.orderStatus], ["Amount", `${order.amount} ${order.currency}`], ["Reference", order.merchantOrderReference]
-      ].map(([label, value]) => `<div class="metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
-    }
-    await Promise.all([loadTimeline(), loadInvestigations()]);
-  }
-  async function loadTimeline() {
-    $("timeline").className = "empty"; $("timeline").textContent = "Loading timeline…";
-    $("timeline-label").textContent = "Loading…";
-    try {
-      const timeline = await api(`/api/orders/${encodeURIComponent(state.orderId)}/timeline`);
-      const entries = timeline.entries || [];
-      const attempts = entries.filter((entry) => entry.entryType === "PAYMENT_ATTEMPT_CREATED");
-      const attemptSelect = $("attempt-select");
-      attemptSelect.innerHTML = attempts.length
-        ? attempts.map((entry) => `<option value="${escapeHtml(entry.id)}">${escapeHtml(idShort(entry.id))} · ${escapeHtml(entry.provider)} · ${escapeHtml(entry.currentStatus)}</option>`).join("")
-        : '<option value="">No attempts loaded</option>';
-      state.attemptId = attempts.some((entry) => entry.id === state.attemptId)
-        ? state.attemptId : (attempts[0]?.id || "");
-      attemptSelect.value = state.attemptId;
-      $("timeline-label").textContent = `${timeline.currentOrderStatus} · ${entries.length} entries`;
-      if (!entries.length) { $("timeline").className = "empty"; $("timeline").textContent = "No payment activity recorded."; return; }
-      $("timeline").className = "timeline";
-      $("timeline").innerHTML = entries.map((entry) => {
-        const details = [
-          entry.provider, entry.currentStatus, entry.eventType,
-          entry.sourceType, entry.verificationStatus && `verification: ${entry.verificationStatus}`,
-          entry.processingStatus && `processing: ${entry.processingStatus}`,
-          entry.amount != null && `${entry.amount} ${entry.currency}`,
-          entry.providerEventId && `event ${entry.providerEventId}`
-        ].filter(Boolean).join(" · ");
-        return `<div class="timeline-item"><span class="dot"></span><div><h4>${escapeHtml(entry.entryType.replaceAll("_", " "))}</h4><p>${escapeHtml(time(entry.occurredAt))}${details ? ` · ${escapeHtml(details)}` : ""}</p><p class="small">Record ${escapeHtml(idShort(entry.id))}</p></div></div>`;
-      }).join("");
-    } catch (error) { $("timeline").className = "empty"; $("timeline").textContent = error.message; $("timeline-label").textContent = "Unavailable"; }
-  }
-  async function loadInvestigations(preferredId = "") {
-    const select = $("investigation-select");
-    select.innerHTML = '<option value="">Loading…</option>';
-    try {
-      const list = await api(`/api/orders/${encodeURIComponent(state.orderId)}/investigations`);
-      select.innerHTML = '<option value="">Select a previous investigation…</option>' + list.map((item) =>
-        `<option value="${escapeHtml(item.id)}">${escapeHtml(time(item.createdAt))} · ${escapeHtml(item.decision)} · ${escapeHtml(item.reason)}</option>`
+    async function loadOrders(preferredId = state.orderId) {
+      const select = $("order-select");
+      select.innerHTML = '<option value="">Loading…</option>';
+      const orders = await api("/api/orders");
+      state.orders = Array.isArray(orders) ? orders : [];
+      select.innerHTML = '<option value="">Select an order…</option>' + state.orders.map((order) =>
+        `<option value="${escapeHtml(order.id)}">${escapeHtml(order.merchantOrderReference)} · ${escapeHtml(order.amount)} ${escapeHtml(order.currency)} · ${escapeHtml(order.orderStatus)}</option>`
       ).join("");
-      if (!list.length) {
-        $("investigation-result").className = "empty"; $("investigation-result").textContent = "No investigations have been run for this order.";
+      if (!state.orders.length) {
+        $("order-summary").className = "empty"; $("order-summary").textContent = "No orders yet. Create a merchant order to begin.";
+        state.orderId = ""; return;
+      }
+      const selected = state.orders.some((order) => order.id === preferredId) ? preferredId : state.orders[0].id;
+      select.value = selected; await selectOrder(selected);
+    }
+    async function selectOrder(orderId) {
+      state.orderId = orderId || ""; state.attemptId = ""; state.investigationId = "";
+      state.workflowId = ""; state.workflowStatus = ""; state.workflowStepCount = 0;
+      state.workflowResult = ""; state.workflowSteps = []; state.workflowRecommendation = "";
+      $("workflow-status").className = "status muted";
+      $("workflow-status").textContent = orderId ? "Loading workflow history…" : "";
+      $("workflow-details").style.display = "none";
+      $("workflow-details").innerHTML = "";
+      $("start-workflow").disabled = !orderId;
+      $("refresh-workflow").style.display = "none";
+      $("explain").disabled = true; $("explanation").classList.add("hidden");
+      $("investigation-result").className = "empty";
+      $("history").className = "empty"; $("history").textContent = "Select an investigation to view its audit history.";
+      if (!orderId) {
+        $("start-workflow").disabled = true;
+        $("refresh-workflow").style.display = "none";
+        $("workflow-order-select").className = "empty";
+        $("workflow-order-select").textContent = "Select an order to start a workflow";
         return;
       }
-      const id = list.some((item) => item.id === preferredId) ? preferredId : list[0].id;
-      select.value = id; await selectInvestigation(id);
-    } catch (error) { select.innerHTML = '<option value="">Could not load investigations</option>'; $("investigation-result").textContent = error.message; }
-  }
-  async function selectInvestigation(id) {
-    state.investigationId = id || "";
-    $("explain").disabled = !id; $("explanation").classList.add("hidden");
-    if (!id) return;
-    try {
-      const [investigation, history] = await Promise.all([
-        api(`/api/investigations/${encodeURIComponent(id)}`),
-        api(`/api/investigations/${encodeURIComponent(id)}/history`)
-      ]);
-      renderInvestigation(investigation); renderHistory(history);
-    } catch (error) { $("investigation-result").className = "empty"; $("investigation-result").textContent = error.message; }
-  }
-  function renderInvestigation(item) {
-    const findings = item.findings || [];
-    const findingHtml = findings.length ? findings.map((finding) => {
-      const refs = (finding.evidence || []).map((ref) => `<span class="ref">${escapeHtml(ref.type)} · ${escapeHtml(idShort(ref.id))}</span>`).join("");
-      return `<article class="finding"><div class="finding-top"><h4>${escapeHtml(finding.title)}</h4><span class="tag ${escapeHtml(finding.severity)}">${escapeHtml(finding.severity)}</span></div><p>${escapeHtml(finding.description)}</p><div class="small muted">${escapeHtml(finding.code)} · ${escapeHtml(finding.rootCauseCategory)} · root cause uncertain: ${finding.rootCauseUncertain ? "yes" : "no"}</div><div class="refs">${refs || '<span class="muted small">No linked evidence reference</span>'}</div><p class="recommend"><strong>Operator review:</strong> ${escapeHtml(finding.recommendedAction)}</p></article>`;
-    }).join("") : '<div class="empty">No finding category is supported by the recorded evidence.</div>';
-    $("investigation-result").className = "investigation";
-    $("investigation-result").innerHTML = `<div class="decision ${escapeHtml(item.decision)}">${escapeHtml(item.decision.replaceAll("_", " "))}</div><p><strong>${escapeHtml(item.reason)}</strong><br>${escapeHtml(item.explanation)}</p><div class="small muted">Rules ${escapeHtml(item.rulesVersion)} · ${escapeHtml(time(item.createdAt))}</div><h4 style="margin:15px 0 7px">Evidence-based findings</h4>${findingHtml}`;
-  }
-  function renderHistory(items) {
-    $("history-label").textContent = `${items.length} audit ${items.length === 1 ? "entry" : "entries"}`;
-    if (!items.length) { $("history").className = "empty"; $("history").textContent = "No history entries."; return; }
-    $("history").className = "history";
-    $("history").innerHTML = items.map((entry) => `<div class="history-row"><strong>${escapeHtml(entry.action)}</strong> · ${escapeHtml(entry.previousDecision || "—")} → ${escapeHtml(entry.newDecision || "—")}<br><span class="muted">${escapeHtml(entry.reason)} · ${escapeHtml(time(entry.createdAt))}</span></div>`).join("");
-  }
-  $("order-form").addEventListener("submit", async (event) => {
-    event.preventDefault(); const form = new FormData(event.currentTarget);
-    const payload = Object.fromEntries(form.entries()); payload.amount = Number(payload.amount);
-    payload.currency = payload.currency.trim().toUpperCase();
-    $("create-order").disabled = true; message("create-status", "Creating order…");
-    try {
-      const order = await api("/api/orders", { method: "POST", body: JSON.stringify(payload) });
-      message("create-status", `Order created: ${order.merchantOrderReference}`, "success");
-      event.currentTarget.reset(); $("currency").value = "USD"; await loadOrders(order.id);
-    } catch (error) { message("create-status", error.message, "error"); }
-    finally { $("create-order").disabled = false; }
-  });
-  $("refresh-orders").addEventListener("click", () => loadOrders().catch((error) => {
-    $("order-summary").className = "empty"; $("order-summary").textContent = error.message;
-  }));
-  $("order-select").addEventListener("change", (event) => selectOrder(event.target.value));
-  $("attempt-select").addEventListener("change", (event) => { state.attemptId = event.target.value; });
-  $("create-attempt").addEventListener("click", async () => {
-    if (!state.orderId) { message("attempt-status", "Select an order first.", "error"); return; }
-    const button = $("create-attempt"); button.disabled = true; message("attempt-status", "Creating local attempt…");
-    try {
-      const attempt = await api(`/api/orders/${encodeURIComponent(state.orderId)}/payment-attempts`, {
-        method: "POST", body: JSON.stringify({ provider: $("provider").value })
-      });
-      state.attemptId = attempt.id;
-      message("attempt-status", `Attempt ${idShort(attempt.id)} created (${attempt.paymentStatus}). No charge was made.`, "success");
-      await loadTimeline();
-    } catch (error) { message("attempt-status", error.message, "error"); }
-    finally { button.disabled = false; }
-  });
-  $("paypal-order").addEventListener("click", async () => {
-    if (!state.attemptId) { message("paypal-status", "Create or select an order with a payment attempt first.", "error"); return; }
-    const button = $("paypal-order"); button.disabled = true; $("approval-link").classList.add("hidden");
-    message("paypal-status", "Requesting PayPal Sandbox order…");
-    try {
-      const result = await api(`/api/payment-attempts/${encodeURIComponent(state.attemptId)}/paypal/order`, { method: "POST" });
-      message("paypal-status", `Sandbox order created (${result.providerStatus}). Open the approval link to continue in PayPal.`, "success");
-      if (result.approvalUrl) {
-        const approval = new URL(result.approvalUrl);
-        if (approval.protocol === "https:" && approval.hostname === "www.sandbox.paypal.com") {
-          $("approval-link").innerHTML = `<a class="button secondary" href="${escapeHtml(approval.href)}" target="_blank" rel="noopener noreferrer">Open PayPal approval</a>`;
-          $("approval-link").classList.remove("hidden");
-        }
+      const order = state.orders.find((item) => item.id === orderId);
+      if (order) {
+        $("order-summary").className = "order-meta";
+        $("order-summary").innerHTML = [
+          ["Status", order.orderStatus], ["Amount", `${order.amount} ${order.currency}`], ["Reference", order.merchantOrderReference]
+        ].map(([label, value]) => `<div class="metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
       }
-      await loadTimeline();
-    } catch (error) { message("paypal-status", error.message, "error"); }
-    finally { button.disabled = false; }
-  });
-  $("paypal-capture").addEventListener("click", async () => {
-    if (!state.attemptId) { message("paypal-status", "Create or select a payment attempt first.", "error"); return; }
-    if (!window.confirm("Send an explicit capture request for this PayPal Sandbox payment?")) return;
-    const button = $("paypal-capture"); button.disabled = true; message("paypal-status", "Sending explicit Sandbox capture request…");
-    try {
-      const result = await api(`/api/payment-attempts/${encodeURIComponent(state.attemptId)}/paypal/capture`, { method: "POST" });
-      message("paypal-status", `Capture response: ${result.providerStatus} · local status: ${result.paymentStatus}.`, "success");
-      await loadTimeline();
-    } catch (error) { message("paypal-status", error.message, "error"); }
-    finally { button.disabled = false; }
-  });
-  $("run-investigation").addEventListener("click", async () => {
-    if (!state.orderId) { $("investigation-result").className = "empty"; $("investigation-result").textContent = "Select an order first."; return; }
-    const button = $("run-investigation"); button.disabled = true; $("investigation-result").className = "empty"; $("investigation-result").textContent = "Evaluating persisted payment evidence…";
-    try {
-      const result = await api(`/api/orders/${encodeURIComponent(state.orderId)}/investigations`, { method: "POST" });
-      await loadInvestigations(result.id);
-    } catch (error) { $("investigation-result").textContent = error.message; }
-    finally { button.disabled = false; }
-  });
-  $("investigation-select").addEventListener("change", (event) => selectInvestigation(event.target.value));
-  $("explain").addEventListener("click", async () => {
-    if (!state.investigationId) return;
-    const button = $("explain"); button.disabled = true; message("paypal-status", "");
-    const box = $("explanation"); box.classList.remove("hidden"); box.textContent = "Requesting explanation…";
-    try {
-      const result = await api(`/api/investigations/${encodeURIComponent(state.investigationId)}/explanation`, { method: "POST" });
-      box.textContent = `${result.source === "GEMINI" ? "Gemini explanation" : "Deterministic fallback"} · decision remains ${result.decision}\n\n${result.explanation}`;
-    } catch (error) { box.textContent = `Explanation unavailable: ${error.message}`; }
-    finally { button.disabled = false; }
-  });
-  loadOrders().catch((error) => {
-    $("order-select").innerHTML = '<option value="">Orders unavailable</option>';
-    $("order-summary").className = "empty"; $("order-summary").textContent = `Could not load orders: ${error.message}`;
-  });
-})();
+      await Promise.all([loadTimeline(), loadInvestigations()]);
+      $("start-workflow").disabled = !state.orderId;
+      $("refresh-workflow").style.display = "none";
+      await loadWorkflowHistory();
+    }
+    async function loadTimeline() {
+      $("timeline").className = "empty"; $("timeline").textContent = "Loading timeline…";
+      $("timeline-label").textContent = "Loading…";
+      try {
+        const timeline = await api(`/api/orders/${encodeURIComponent(state.orderId)}/timeline`);
+        const entries = timeline.entries || [];
+        const attempts = entries.filter((entry) => entry.entryType === "PAYMENT_ATTEMPT_CREATED");
+        const attemptSelect = $("attempt-select");
+        attemptSelect.innerHTML = attempts.length
+          ? attempts.map((entry) => `<option value="${escapeHtml(entry.id)}">${escapeHtml(idShort(entry.id))} · ${escapeHtml(entry.provider)} · ${escapeHtml(entry.currentStatus)}</option>`).join("")
+          : '<option value="">No attempts loaded</option>';
+        state.attemptId = attempts.some((entry) => entry.id === state.attemptId)
+          ? state.attemptId : (attempts[0]?.id || "");
+        attemptSelect.value = state.attemptId;
+        $("timeline-label").textContent = `${timeline.currentOrderStatus} · ${entries.length} entries`;
+        if (!entries.length) { $("timeline").className = "empty"; $("timeline").textContent = "No payment activity recorded."; return; }
+        $("timeline").className = "timeline";
+        $("timeline").innerHTML = entries.map((entry) => {
+          const details = [
+            entry.provider, entry.currentStatus, entry.eventType,
+            entry.sourceType, entry.verificationStatus && `verification: ${entry.verificationStatus}`,
+            entry.processingStatus && `processing: ${entry.processingStatus}`,
+            entry.amount != null && `${entry.amount} ${entry.currency}`,
+            entry.providerEventId && `event ${entry.providerEventId}`
+          ].filter(Boolean).join(" · ");
+          return `<div class="timeline-item"><span class="dot"></span><div><h4>${escapeHtml(entry.entryType.replaceAll("_", " "))}</h4><p>${escapeHtml(time(entry.occurredAt))}${details ? ` · ${escapeHtml(details)}` : ""}</p><p class="small">Record ${escapeHtml(idShort(entry.id))}</p></div></div>`;
+        }).join("");
+      } catch (error) { $("timeline").className = "empty"; $("timeline").textContent = error.message; $("timeline-label").textContent = "Unavailable"; }
+    }
+    async function loadInvestigations(preferredId = "") {
+      const select = $("investigation-select");
+      select.innerHTML = '<option value="">Loading…</option>';
+      try {
+        const list = await api(`/api/orders/${encodeURIComponent(state.orderId)}/investigations`);
+        select.innerHTML = '<option value="">Select a previous investigation…</option>' + list.map((item) =>
+          `<option value="${escapeHtml(item.id)}">${escapeHtml(time(item.createdAt))} · ${escapeHtml(item.decision)} · ${escapeHtml(item.reason)}</option>`
+        ).join("");
+        if (!list.length) {
+          $("investigation-result").className = "empty"; $("investigation-result").textContent = "No investigations have been run for this order.";
+          return;
+        }
+        const id = list.some((item) => item.id === preferredId) ? preferredId : list[0].id;
+        select.value = id; await selectInvestigation(id);
+      } catch (error) { select.innerHTML = '<option value="">Could not load investigations</option>'; $("investigation-result").textContent = error.message; }
+    }
+    async function selectInvestigation(id) {
+      state.investigationId = id || "";
+      $("explain").disabled = !id; $("explanation").classList.add("hidden");
+      if (!id) return;
+      try {
+        const [investigation, history] = await Promise.all([
+          api(`/api/investigations/${encodeURIComponent(id)}`),
+          api(`/api/investigations/${encodeURIComponent(id)}/history`)
+        ]);
+        renderInvestigation(investigation); renderHistory(history);
+      } catch (error) { $("investigation-result").className = "empty"; $("investigation-result").textContent = error.message; }
+    }
+    function renderInvestigation(item) {
+      const findings = item.findings || [];
+      const findingHtml = findings.length ? findings.map((finding) => {
+        const refs = (finding.evidence || []).map((ref) => `<span class="ref">${escapeHtml(ref.type)} · ${escapeHtml(idShort(ref.id))}</span>`).join("");
+        return `<article class="finding"><div class="finding-top"><h4>${escapeHtml(finding.title)}</h4><span class="tag ${escapeHtml(finding.severity)}">${escapeHtml(finding.severity)}</span></div><p>${escapeHtml(finding.description)}</p><div class="small muted">${escapeHtml(finding.code)} · ${escapeHtml(finding.rootCauseCategory)} · root cause uncertain: ${finding.rootCauseUncertain ? "yes" : "no"}</div><div class="refs">${refs || '<span class="muted small">No linked evidence reference</span>'}</div><p class="recommend"><strong>Operator review:</strong> ${escapeHtml(finding.recommendedAction)}</p></article>`;
+      }).join("") : '<div class="empty">No finding category is supported by the recorded evidence.</div>';
+      $("investigation-result").className = "investigation";
+      $("investigation-result").innerHTML = `<div class="decision ${escapeHtml(item.decision)}">${escapeHtml(item.decision.replaceAll("_", " "))}</div><p><strong>${escapeHtml(item.reason)}</strong><br>${escapeHtml(item.explanation)}</p><div class="small muted">Rules ${escapeHtml(item.rulesVersion)} · ${escapeHtml(time(item.createdAt))}</div><h4 style="margin:15px 0 7px">Evidence-based findings</h4>${findingHtml}`;
+    }
+    function renderHistory(items) {
+      $("history-label").textContent = `${items.length} audit ${items.length === 1 ? "entry" : "entries"}`;
+      if (!items.length) { $("history").className = "empty"; $("history").textContent = "No history entries."; return; }
+      $("history").className = "history";
+      $("history").innerHTML = items.map((entry) => `<div class="history-row"><strong>${escapeHtml(entry.action)}</strong> · ${escapeHtml(entry.previousDecision || "—")} → ${escapeHtml(entry.newDecision || "—")}<br><span class="muted">${escapeHtml(entry.reason)} · ${escapeHtml(time(entry.createdAt))}</span></div>`).join("");
+    }
+    $("order-form").addEventListener("submit", async (event) => {
+      event.preventDefault(); const form = new FormData(event.currentTarget);
+      const payload = Object.fromEntries(form.entries()); payload.amount = Number(payload.amount);
+      payload.currency = payload.currency.trim().toUpperCase();
+      $("create-order").disabled = true; message("create-status", "Creating order…");
+      try {
+        const order = await api("/api/orders", { method: "POST", body: JSON.stringify(payload) });
+        message("create-status", `Order created: ${order.merchantOrderReference}`, "success");
+        event.currentTarget.reset(); $("currency").value = "USD"; await loadOrders(order.id);
+      } catch (error) { message("create-status", error.message, "error"); }
+      finally { $("create-order").disabled = false; }
+    });
+    $("refresh-orders").addEventListener("click", () => loadOrders().catch((error) => {
+      $("order-summary").className = "empty"; $("order-summary").textContent = error.message;
+    }));
+    $("order-select").addEventListener("change", (event) => selectOrder(event.target.value));
+    $("attempt-select").addEventListener("change", (event) => { state.attemptId = event.target.value; });
+    $("create-attempt").addEventListener("click", async () => {
+      if (!state.orderId) { message("attempt-status", "Select an order first.", "error"); return; }
+      const button = $("create-attempt"); button.disabled = true; message("attempt-status", "Creating local attempt…");
+      try {
+        const attempt = await api(`/api/orders/${encodeURIComponent(state.orderId)}/payment-attempts`, {
+          method: "POST", body: JSON.stringify({ provider: $("provider").value })
+        });
+        state.attemptId = attempt.id;
+        message("attempt-status", `Attempt ${idShort(attempt.id)} created (${attempt.paymentStatus}). No charge was made.`, "success");
+        await loadTimeline();
+      } catch (error) { message("attempt-status", error.message, "error"); }
+      finally { button.disabled = false; }
+    });
+    $("paypal-order").addEventListener("click", async () => {
+      if (!state.attemptId) { message("paypal-status", "Create or select an order with a payment attempt first.", "error"); return; }
+      const button = $("paypal-order"); button.disabled = true; $("approval-link").classList.add("hidden");
+      message("paypal-status", "Requesting PayPal Sandbox order…");
+      try {
+        const result = await api(`/api/payment-attempts/${encodeURIComponent(state.attemptId)}/paypal/order`, { method: "POST" });
+        message("paypal-status", `Sandbox order created (${result.providerStatus}). Open the approval link to continue in PayPal.`, "success");
+        if (result.approvalUrl) {
+          const approval = new URL(result.approvalUrl);
+          if (approval.protocol === "https:" && approval.hostname === "www.sandbox.paypal.com") {
+            $("approval-link").innerHTML = `<a class="button secondary" href="${escapeHtml(approval.href)}" target="_blank" rel="noopener noreferrer">Open PayPal approval</a>`;
+            $("approval-link").classList.remove("hidden");
+          }
+        }
+        await loadTimeline();
+      } catch (error) { message("paypal-status", error.message, "error"); }
+      finally { button.disabled = false; }
+    });
+    $("paypal-capture").addEventListener("click", async () => {
+      if (!state.attemptId) { message("paypal-status", "Create or select a payment attempt first.", "error"); return; }
+      if (!window.confirm("Send an explicit capture request for this PayPal Sandbox payment?")) return;
+      const button = $("paypal-capture"); button.disabled = true; message("paypal-status", "Sending explicit Sandbox capture request…");
+      try {
+        const result = await api(`/api/payment-attempts/${encodeURIComponent(state.attemptId)}/paypal/capture`, { method: "POST" });
+        message("paypal-status", `Capture response: ${result.providerStatus} · local status: ${result.paymentStatus}.`, "success");
+        await loadTimeline();
+      } catch (error) { message("paypal-status", error.message, "error"); }
+      finally { button.disabled = false; }
+    });
+    $("run-investigation").addEventListener("click", async () => {
+      if (!state.orderId) { $("investigation-result").className = "empty"; $("investigation-result").textContent = "Select an order first."; return; }
+      const button = $("run-investigation"); button.disabled = true; $("investigation-result").className = "empty"; $("investigation-result").textContent = "Evaluating persisted payment evidence…";
+      try {
+        const result = await api(`/api/orders/${encodeURIComponent(state.orderId)}/investigations`, { method: "POST" });
+        await loadInvestigations(result.id);
+      } catch (error) { $("investigation-result").textContent = error.message; }
+      finally { button.disabled = false; }
+    });
+    $("investigation-select").addEventListener("change", (event) => selectInvestigation(event.target.value));
+    $("explain").addEventListener("click", async () => {
+      if (!state.investigationId) return;
+      const button = $("explain"); button.disabled = true; message("paypal-status", "");
+      const box = $("explanation"); box.classList.remove("hidden"); box.textContent = "Requesting explanation…";
+      try {
+        const result = await api(`/api/investigations/${encodeURIComponent(state.investigationId)}/explanation`, { method: "POST" });
+        box.textContent = `${result.source === "GEMINI" ? "Gemini explanation" : "Deterministic fallback"} · decision remains ${result.decision}\n\n${result.explanation}`;
+      } catch (error) { box.textContent = `Explanation unavailable: ${error.message}`; }
+      finally { button.disabled = false; }
+    });
+
+    // Agentic AI Workflow handlers
+    const WORKFLOW_ERROR_STATUSES = new Set([
+      "ERROR", "PROVIDER_ERROR", "BUDGET_EXCEEDED", "FAILED"
+    ]);
+
+    function workflowStatusLabel(status) {
+      return String(status || "UNKNOWN").replaceAll("_", " ");
+    }
+
+    function renderWorkflowSteps(steps) {
+      if (!Array.isArray(steps) || !steps.length) {
+        return '<p class="muted small">No workflow steps were returned.</p>';
+      }
+
+      return `<h4 style="margin:15px 0 7px">Execution steps</h4>
+        <div class="history">${steps.map((step, index) => {
+          const name = escapeHtml(step.stepName || step.name || step.stepType || `Step ${index + 1}`);
+          const type = escapeHtml(step.stepType || "STEP");
+          const summary = escapeHtml(step.outputSummary || step.inputSummary || "");
+          return `<div class="history-row">
+            <strong>${index + 1}. ${name}</strong>
+            <span class="tag">${type}</span>
+            ${summary ? `<p class="muted small" style="margin:6px 0 0;white-space:pre-wrap;overflow-wrap:anywhere">${summary}</p>` : ""}
+          </div>`;
+        }).join("")}</div>`;
+    }
+
+    function applyWorkflow(workflow) {
+      if (!workflow || typeof workflow !== "object") {
+        throw new Error("The workflow endpoint returned an empty response.");
+      }
+
+      state.workflowId = workflow.id || state.workflowId;
+      state.workflowStatus = workflow.status || "UNKNOWN";
+      state.workflowSteps = Array.isArray(workflow.steps) ? workflow.steps : [];
+      state.workflowStepCount = state.workflowSteps.length;
+      state.workflowResult = workflow.summary || "";
+      // Prefer the actual RECOMMENDATION step, not the tool-call name
+      // "final_recommendation", which only identifies the tool that was invoked.
+      const recommendationStep = state.workflowSteps.find(
+        (step) => step.stepType === "RECOMMENDATION"
+      );
+      state.workflowRecommendation =
+        recommendationStep?.stepName ||
+        workflow.recommendation ||
+        workflow.summary ||
+        "";
+
+      updateWorkflowUI();
+    }
+
+    async function startAgentWorkflow() {
+      if (!state.orderId) {
+        message("workflow-status", "Select an order first.", "error");
+        return;
+      }
+
+      const button = $("start-workflow");
+      button.disabled = true;
+      message("workflow-status", "Starting agent workflow…");
+      $("refresh-workflow").style.display = "none";
+
+      try {
+        const result = await api(
+          `/api/agent/workflows/orders/${encodeURIComponent(state.orderId)}`,
+          { method: "POST" }
+        );
+
+        applyWorkflow(result);
+        $("refresh-workflow").style.display = "inline-block";
+
+        if (state.workflowStatus === "RUNNING") {
+          pollWorkflowStatus();
+        }
+      } catch (error) {
+        message("workflow-status", error.message, "error");
+        button.disabled = false;
+      }
+    }
+
+    async function pollWorkflowStatus() {
+      if (!state.workflowId) return;
+
+      try {
+        const workflow = await api(`/api/agent/workflows/${encodeURIComponent(state.workflowId)}`);
+        applyWorkflow(workflow);
+
+        if (state.workflowStatus === "RUNNING") {
+          setTimeout(pollWorkflowStatus, 3000);
+        }
+      } catch (error) {
+        message("workflow-status", `Could not refresh workflow: ${error.message}`, "error");
+        $("refresh-workflow").style.display = "inline-block";
+      }
+    }
+
+    async function refreshWorkflow() {
+      if (!state.workflowId) {
+        await loadWorkflowHistory();
+        return;
+      }
+
+      const button = $("refresh-workflow");
+      button.disabled = true;
+      try {
+        const workflow = await api(`/api/agent/workflows/${encodeURIComponent(state.workflowId)}`);
+        applyWorkflow(workflow);
+      } catch (error) {
+        message("workflow-status", `Could not refresh workflow: ${error.message}`, "error");
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    function updateWorkflowUI() {
+      const statusNode = $("workflow-status");
+      const detailsNode = $("workflow-details");
+      const startButton = $("start-workflow");
+      const refreshButton = $("refresh-workflow");
+      const status = state.workflowStatus || "UNKNOWN";
+      const isRunning = status === "RUNNING";
+      const isError = WORKFLOW_ERROR_STATUSES.has(status);
+
+      statusNode.className = `status ${isError ? "error" : (isRunning ? "muted" : "success")}`;
+      statusNode.textContent = isRunning
+        ? `Running… (${idShort(state.workflowId)})`
+        : `${workflowStatusLabel(status)} · Workflow ${idShort(state.workflowId)}`;
+
+      detailsNode.style.display = "block";
+      detailsNode.className = "investigation";
+
+      const resultText = state.workflowResult || "No summary was returned.";
+      const recommendationText = state.workflowRecommendation || "No recommendation was returned.";
+
+      detailsNode.innerHTML = `
+        <div class="finding-top">
+          <h4>Agent workflow result</h4>
+          <span class="tag ${isError ? "HIGH" : (isRunning ? "MEDIUM" : "LOW")}">${escapeHtml(workflowStatusLabel(status))}</span>
+        </div>
+        <p><strong>Workflow ID:</strong> <span class="small">${escapeHtml(state.workflowId || "Unavailable")}</span></p>
+        <p><strong>Steps executed:</strong> ${state.workflowStepCount}</p>
+        <p><strong>Summary:</strong> ${escapeHtml(resultText)}</p>
+        <p class="recommend"><strong>Recommendation:</strong> ${escapeHtml(recommendationText)}</p>
+        ${renderWorkflowSteps(state.workflowSteps)}
+        <p class="muted small">Advisory only. The agent uses read-only diagnostic tools and does not execute payment actions.</p>
+      `;
+
+      startButton.disabled = !state.orderId || isRunning || (!isError && status !== "UNKNOWN");
+      refreshButton.style.display = state.workflowId ? "inline-block" : "none";
+    }
+
+    async function loadWorkflowHistory() {
+      if (!state.orderId) return;
+
+      const orderLabel = $("workflow-order-select");
+      orderLabel.className = "empty";
+      orderLabel.textContent = "Loading workflow history…";
+
+      try {
+        const response = await api(
+          `/api/agent/workflows?orderId=${encodeURIComponent(state.orderId)}`
+        );
+
+        const workflows = Array.isArray(response)
+          ? response
+          : (Array.isArray(response?.content) ? response.content
+            : (Array.isArray(response?.items) ? response.items : []));
+
+        orderLabel.className = workflows.length ? "muted small" : "empty";
+        orderLabel.textContent = `${workflows.length} workflow${workflows.length !== 1 ? "s" : ""} for this order`;
+
+        if (!workflows.length) {
+          state.workflowId = "";
+          state.workflowStatus = "";
+          state.workflowSteps = [];
+          state.workflowStepCount = 0;
+          state.workflowResult = "";
+          state.workflowRecommendation = "";
+          $("workflow-status").className = "status muted";
+          $("workflow-status").textContent = "No workflow has been run for this order yet.";
+          $("workflow-details").style.display = "none";
+          $("start-workflow").disabled = false;
+          $("refresh-workflow").style.display = "none";
+          return;
+        }
+
+        // Prefer the newest timestamp when supplied; otherwise use the last item.
+        const latest = [...workflows].sort((a, b) => {
+          const dateA = Date.parse(a.startedAt || a.createdAt || a.completedAt || "") || 0;
+          const dateB = Date.parse(b.startedAt || b.createdAt || b.completedAt || "") || 0;
+          return dateA - dateB;
+        }).at(-1);
+
+        if (!latest?.id) {
+          throw new Error("Workflow history did not include a workflow ID.");
+        }
+
+        state.workflowId = latest.id;
+        const detail = await api(`/api/agent/workflows/${encodeURIComponent(latest.id)}`);
+        applyWorkflow(detail);
+        $("refresh-workflow").style.display = "inline-block";
+      } catch (error) {
+        orderLabel.className = "empty";
+        orderLabel.textContent = `Could not load workflow history: ${error.message}`;
+        $("workflow-status").className = "status error";
+        $("workflow-status").textContent = "Workflow status could not be loaded. Use Refresh Workflow to retry.";
+        $("start-workflow").disabled = !state.orderId;
+      }
+    }
+
+    $("start-workflow").addEventListener("click", startAgentWorkflow);
+    $("refresh-workflow").addEventListener("click", refreshWorkflow);
+    loadOrders().catch((error) => {
+      $("order-select").innerHTML = '<option value="">Orders unavailable</option>';
+      $("order-summary").className = "empty"; $("order-summary").textContent = `Could not load orders: ${error.message}`;
+    });
+  })();
 </script>
 </body>
 </html>

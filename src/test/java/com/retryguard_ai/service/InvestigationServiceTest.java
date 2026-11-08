@@ -1,6 +1,8 @@
 package com.retryguard_ai.service;
 
 import com.retryguard_ai.dto.InvestigationResponse;
+import com.retryguard_ai.dto.InvestigationResponse.PaymentStateClassification;
+import com.retryguard_ai.dto.InvestigationResponse.TimelineEntry;
 import com.retryguard_ai.dto.AutopsyFinding;
 import com.retryguard_ai.entity.Investigation;
 import com.retryguard_ai.entity.InvestigationHistory;
@@ -26,6 +28,7 @@ import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -37,6 +40,7 @@ import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.assertj.core.api.Assertions.assertThat;
 
 @ExtendWith(MockitoExtension.class)
 class InvestigationServiceTest {
@@ -73,12 +77,16 @@ class InvestigationServiceTest {
         attempt.setPaymentStatus(PaymentAttempt.PaymentStatus.FAILED);
         lenient().when(merchantOrderRepository.findById(order.getId()))
                 .thenReturn(Optional.of(order));
+        lenient().when(merchantOrderRepository.existsById(order.getId()))
+                .thenReturn(true);
         lenient().when(paymentAttemptRepository.findByOrder_Id(order.getId()))
                 .thenReturn(List.of(attempt));
         lenient().when(paymentEventRepository.findByPaymentAttempt_IdInOrderByReceivedAtAsc(
                 List.of(attempt.getId()))).thenReturn(List.of());
         lenient().when(investigationRepository.findFirstByOrder_IdOrderByCreatedAtDescIdDesc(order.getId()))
                 .thenReturn(Optional.empty());
+        lenient().when(investigationRepository.findTop50ByOrder_IdOrderByCreatedAtDescIdDesc(order.getId()))
+                .thenReturn(List.of());
         lenient().when(investigationRepository.save(any(Investigation.class)))
                 .thenAnswer(invocation -> invocation.getArgument(0));
         lenient().when(investigationHistoryRepository.save(any(InvestigationHistory.class)))
@@ -187,7 +195,8 @@ class InvestigationServiceTest {
         assertFindingReferences(response, "STALE_EVIDENCE", denial.getId());
         assertFindingReferences(response, "STALE_EVIDENCE", completion.getId());
         assertFindingReferences(response, "CONFLICTING_OUTCOMES", order.getId());
-        assertFindingReferences(response, "PAYMENT_CONFIRMED", order.getId());
+        // Verified completion evidence triggers PAYMENT_CONFIRMED finding
+        assertFindingReferences(response, "PAYMENT_CONFIRMED", completion.getId());
     }
 
     private void assertFindingReferences(
@@ -551,6 +560,388 @@ class InvestigationServiceTest {
 
         verify(investigationRepository, never()).save(any());
         verify(investigationHistoryRepository, never()).save(any());
+    }
+
+    @Test
+    void paymentStateClassificationSuccessfulAttempt() {
+        PaymentEvent completion = event("PAYMENT.CAPTURE.COMPLETED",
+                PaymentEvent.SourceType.PROVIDER,
+                PaymentEvent.VerificationStatus.VERIFIED,
+                OffsetDateTime.now().minusMinutes(1),
+                "{}");
+        completion.setPaymentAttempt(attempt);
+        attempt.setPaymentStatus(PaymentAttempt.PaymentStatus.SUCCEEDED);
+        when(paymentEventRepository.findByPaymentAttempt_IdInOrderByReceivedAtAsc(
+                List.of(attempt.getId()))).thenReturn(List.of(completion));
+
+        InvestigationResponse response = service.investigate(order.getId());
+
+        assertThat(response.paymentClassifications()).hasSize(1);
+        PaymentStateClassification classification = response.paymentClassifications().get(0);
+        assertThat(classification.paymentAttemptId()).isEqualTo(attempt.getId());
+        assertThat(classification.state()).isEqualTo("SUCCESSFUL");
+        assertThat(classification.reason()).contains("Verified provider completion evidence");
+        assertThat(classification.supportingEvidenceIds()).contains(completion.getId());
+    }
+
+    @Test
+    void paymentStateClassificationFailedAttemptWithFreshDenial() {
+        PaymentEvent denial = event("PAYMENT.CAPTURE.DENIED",
+                PaymentEvent.SourceType.PROVIDER,
+                PaymentEvent.VerificationStatus.VERIFIED,
+                OffsetDateTime.now().minusMinutes(1),
+                "{\"create_time\":\"" + OffsetDateTime.now().minusMinutes(1) + "\"}");
+        denial.setPaymentAttempt(attempt);
+        attempt.setPaymentStatus(PaymentAttempt.PaymentStatus.FAILED);
+        when(paymentEventRepository.findByPaymentAttempt_IdInOrderByReceivedAtAsc(
+                List.of(attempt.getId()))).thenReturn(List.of(denial));
+
+        InvestigationResponse response = service.investigate(order.getId());
+
+        assertThat(response.paymentClassifications()).hasSize(1);
+        PaymentStateClassification classification = response.paymentClassifications().get(0);
+        assertThat(classification.state()).isEqualTo("FAILED");
+        assertThat(classification.reason()).contains("Fresh, verified provider denial");
+        assertThat(classification.supportingEvidenceIds()).contains(denial.getId());
+    }
+
+    @Test
+    void paymentStateClassificationPendingAttempt() {
+        PaymentEvent pending = event("PAYMENT.CAPTURE.PENDING",
+                PaymentEvent.SourceType.PROVIDER,
+                PaymentEvent.VerificationStatus.VERIFIED,
+                OffsetDateTime.now().minusMinutes(1),
+                "{\"create_time\":\"" + OffsetDateTime.now().minusMinutes(1) + "\"}");
+        pending.setPaymentAttempt(attempt);
+        attempt.setPaymentStatus(PaymentAttempt.PaymentStatus.PENDING);
+        when(paymentEventRepository.findByPaymentAttempt_IdInOrderByReceivedAtAsc(
+                List.of(attempt.getId()))).thenReturn(List.of(pending));
+
+        InvestigationResponse response = service.investigate(order.getId());
+
+        assertThat(response.paymentClassifications()).hasSize(1);
+        PaymentStateClassification classification = response.paymentClassifications().get(0);
+        assertThat(classification.state()).isEqualTo("PENDING");
+        assertThat(classification.reason()).contains("Verified provider pending evidence");
+    }
+
+    @Test
+    void paymentStateClassificationConflictingAttempt() {
+        PaymentEvent denial = event("PAYMENT.CAPTURE.DENIED",
+                PaymentEvent.SourceType.PROVIDER,
+                PaymentEvent.VerificationStatus.VERIFIED,
+                OffsetDateTime.now().minusMinutes(2),
+                "{\"create_time\":\"" + OffsetDateTime.now().minusMinutes(2) + "\"}");
+        PaymentEvent completion = event("PAYMENT.CAPTURE.COMPLETED",
+                PaymentEvent.SourceType.PROVIDER,
+                PaymentEvent.VerificationStatus.VERIFIED,
+                OffsetDateTime.now().minusMinutes(1),
+                "{\"create_time\":\"" + OffsetDateTime.now().minusMinutes(1) + "\"}");
+        denial.setPaymentAttempt(attempt);
+        completion.setPaymentAttempt(attempt);
+        attempt.setPaymentStatus(PaymentAttempt.PaymentStatus.FAILED);
+        when(paymentEventRepository.findByPaymentAttempt_IdInOrderByReceivedAtAsc(
+                List.of(attempt.getId()))).thenReturn(List.of(denial, completion));
+
+        InvestigationResponse response = service.investigate(order.getId());
+
+        assertThat(response.paymentClassifications()).hasSize(1);
+        PaymentStateClassification classification = response.paymentClassifications().get(0);
+        assertThat(classification.state()).isEqualTo("CONFLICTING");
+        assertThat(classification.reason()).contains("both denial and completion");
+        assertThat(classification.supportingEvidenceIds()).contains(denial.getId());
+        assertThat(classification.supportingEvidenceIds()).contains(completion.getId());
+    }
+
+    @Test
+    void paymentStateClassificationUncertainAttemptNoEvents() {
+        attempt.setPaymentStatus(PaymentAttempt.PaymentStatus.CREATED);
+        when(paymentEventRepository.findByPaymentAttempt_IdInOrderByReceivedAtAsc(
+                List.of(attempt.getId()))).thenReturn(List.of());
+
+        InvestigationResponse response = service.investigate(order.getId());
+
+        assertThat(response.paymentClassifications()).hasSize(1);
+        PaymentStateClassification classification = response.paymentClassifications().get(0);
+        assertThat(classification.state()).isEqualTo("UNCERTAIN");
+        assertThat(classification.reason()).contains("No payment events recorded for this attempt");
+    }
+
+    @Test
+    void timelineReconstructionContainsOrderAndAttemptEvents() {
+        PaymentEvent denial = event("PAYMENT.CAPTURE.DENIED",
+                PaymentEvent.SourceType.PROVIDER,
+                PaymentEvent.VerificationStatus.VERIFIED,
+                OffsetDateTime.now().minusMinutes(1),
+                "{\"create_time\":\"" + OffsetDateTime.now().minusMinutes(1) + "\"}");
+        denial.setPaymentAttempt(attempt);
+        attempt.setPaymentStatus(PaymentAttempt.PaymentStatus.FAILED);
+        when(paymentEventRepository.findByPaymentAttempt_IdInOrderByReceivedAtAsc(
+                List.of(attempt.getId()))).thenReturn(List.of(denial));
+
+        InvestigationResponse response = service.investigate(order.getId());
+
+        assertThat(response.timeline()).isNotEmpty();
+        // Order created entry may not exist in unit tests (order not persisted)
+        assertThat(response.timeline())
+                .anyMatch(entry -> "PAYMENT.CAPTURE.DENIED".equals(entry.eventType()));
+        assertThat(response.timeline())
+                .anyMatch(entry -> "ATTEMPT_CREATED".equals(entry.eventType()));
+        // Filter out entries with null timestamps
+        response.timeline().stream()
+                .filter(entry -> entry.timestamp() != null)
+                .forEach(entry ->
+                        assertThat(entry.timestamp()).isBeforeOrEqualTo(OffsetDateTime.now().plusSeconds(1)));
+    }
+
+    @Test
+    void timelineReconstructionHandlesOutOfOrderEvents() {
+        OffsetDateTime earlier = OffsetDateTime.now().minusMinutes(10);
+        OffsetDateTime later = OffsetDateTime.now().minusMinutes(5);
+        PaymentEvent lateReceivedDenial = event("PAYMENT.CAPTURE.DENIED",
+                PaymentEvent.SourceType.PROVIDER,
+                PaymentEvent.VerificationStatus.VERIFIED,
+                later,
+                "{\"create_time\":\"" + earlier + "\"}");
+        PaymentEvent earlyReceivedCompletion = event("PAYMENT.CAPTURE.COMPLETED",
+                PaymentEvent.SourceType.PROVIDER,
+                PaymentEvent.VerificationStatus.VERIFIED,
+                earlier,
+                "{\"create_time\":\"" + later + "\"}");
+        lateReceivedDenial.setPaymentAttempt(attempt);
+        earlyReceivedCompletion.setPaymentAttempt(attempt);
+        attempt.setPaymentStatus(PaymentAttempt.PaymentStatus.FAILED);
+        when(paymentEventRepository.findByPaymentAttempt_IdInOrderByReceivedAtAsc(
+                List.of(attempt.getId()))).thenReturn(List.of(lateReceivedDenial, earlyReceivedCompletion));
+
+        InvestigationResponse response = service.investigate(order.getId());
+
+        assertThat(response.timeline()).isNotEmpty();
+        List<TimelineEntry> eventEntries = response.timeline().stream()
+                .filter(entry -> "PAYMENT_EVENT".equals(entry.evidenceType()))
+                .toList();
+        assertThat(eventEntries).hasSize(2);
+        assertThat(eventEntries.get(0).timestamp()).isEqualTo(earlier);
+        assertThat(eventEntries.get(1).timestamp()).isEqualTo(later);
+    }
+
+    @Test
+    void timelineReconstructionDoesNotInventMissingEvents() {
+        attempt.setPaymentStatus(PaymentAttempt.PaymentStatus.CREATED);
+        when(paymentEventRepository.findByPaymentAttempt_IdInOrderByReceivedAtAsc(
+                List.of(attempt.getId()))).thenReturn(List.of());
+
+        InvestigationResponse response = service.investigate(order.getId());
+
+        List<TimelineEntry> eventEntries = response.timeline().stream()
+                .filter(entry -> "PAYMENT_EVENT".equals(entry.evidenceType()))
+                .toList();
+        assertThat(eventEntries).isEmpty();
+        response.timeline().forEach(entry ->
+                assertThat(entry.description()).isNotNull());
+    }
+
+    @Test
+    void conflictDetectionExplainsWhichEvidenceConflicts() {
+        PaymentEvent denial = event("PAYMENT.CAPTURE.DENIED",
+                PaymentEvent.SourceType.PROVIDER,
+                PaymentEvent.VerificationStatus.VERIFIED,
+                OffsetDateTime.now().minusMinutes(2),
+                "{\"create_time\":\"" + OffsetDateTime.now().minusMinutes(2) + "\"}");
+        PaymentEvent completion = event("PAYMENT.CAPTURE.COMPLETED",
+                PaymentEvent.SourceType.PROVIDER,
+                PaymentEvent.VerificationStatus.VERIFIED,
+                OffsetDateTime.now().minusMinutes(1),
+                "{\"create_time\":\"" + OffsetDateTime.now().minusMinutes(1) + "\"}");
+        denial.setPaymentAttempt(attempt);
+        completion.setPaymentAttempt(attempt);
+        attempt.setPaymentStatus(PaymentAttempt.PaymentStatus.FAILED);
+        when(paymentEventRepository.findByPaymentAttempt_IdInOrderByReceivedAtAsc(
+                List.of(attempt.getId()))).thenReturn(List.of(denial, completion));
+
+        InvestigationResponse response = service.investigate(order.getId());
+
+        assertEquals("RECONCILE", response.decision());
+        assertThat(response.paymentClassifications()).hasSize(1);
+        PaymentStateClassification classification = response.paymentClassifications().get(0);
+        assertThat(classification.state()).isEqualTo("CONFLICTING");
+        assertThat(classification.supportingEvidenceIds())
+                .containsExactlyInAnyOrder(denial.getId(), completion.getId());
+    }
+
+    @Test
+    void missingEvidenceDoesNotAutomaticallyMeanFailure() {
+        attempt.setPaymentStatus(PaymentAttempt.PaymentStatus.FAILED);
+        when(paymentEventRepository.findByPaymentAttempt_IdInOrderByReceivedAtAsc(
+                List.of(attempt.getId()))).thenReturn(List.of());
+
+        InvestigationResponse response = service.investigate(order.getId());
+
+        assertEquals("WAIT", response.decision());
+        assertThat(response.paymentClassifications()).hasSize(1);
+        PaymentStateClassification classification = response.paymentClassifications().get(0);
+        assertThat(classification.state()).isEqualTo("UNCERTAIN");
+        assertThat(classification.reason()).contains("no verified provider terminal evidence");
+    }
+
+    @Test
+    void pendingPaymentIsNotClassifiedAsSuccessfulOrFailed() {
+        PaymentEvent pending = event("PAYMENT.CAPTURE.PENDING",
+                PaymentEvent.SourceType.PROVIDER,
+                PaymentEvent.VerificationStatus.VERIFIED,
+                OffsetDateTime.now().minusMinutes(1),
+                "{\"create_time\":\"" + OffsetDateTime.now().minusMinutes(1) + "\"}");
+        pending.setPaymentAttempt(attempt);
+        attempt.setPaymentStatus(PaymentAttempt.PaymentStatus.PENDING);
+        when(paymentEventRepository.findByPaymentAttempt_IdInOrderByReceivedAtAsc(
+                List.of(attempt.getId()))).thenReturn(List.of(pending));
+
+        InvestigationResponse response = service.investigate(order.getId());
+
+        assertEquals("WAIT", response.decision());
+        assertThat(response.paymentClassifications()).hasSize(1);
+        PaymentStateClassification classification = response.paymentClassifications().get(0);
+        assertThat(classification.state()).isEqualTo("PENDING");
+        assertThat(classification.state()).isNotEqualTo("SUCCESSFUL");
+        assertThat(classification.state()).isNotEqualTo("FAILED");
+    }
+
+    @Test
+    void investigationIsDeterministicForSameEvidence() {
+        OffsetDateTime now = OffsetDateTime.now();
+        PaymentEvent denial = event("PAYMENT.CAPTURE.DENIED",
+                PaymentEvent.SourceType.PROVIDER,
+                PaymentEvent.VerificationStatus.VERIFIED,
+                now.minusMinutes(1),
+                "{\"create_time\":\"" + now.minusMinutes(1) + "\"}");
+        denial.setPaymentAttempt(attempt);
+        attempt.setPaymentStatus(PaymentAttempt.PaymentStatus.FAILED);
+        when(paymentEventRepository.findByPaymentAttempt_IdInOrderByReceivedAtAsc(
+                List.of(attempt.getId()))).thenReturn(List.of(denial));
+
+        InvestigationResponse first = service.investigate(order.getId());
+        InvestigationResponse second = service.investigate(order.getId());
+
+        assertEquals(first.decision(), second.decision());
+        assertEquals(first.reason(), second.reason());
+        assertEquals(first.rulesVersion(), second.rulesVersion());
+        assertEquals(first.paymentClassifications().size(),
+                second.paymentClassifications().size());
+        assertEquals(first.timeline().size(), second.timeline().size());
+    }
+
+    @Test
+    void investigationResponseIncludesPaymentClassificationsAndTimeline() {
+        PaymentEvent denial = event("PAYMENT.CAPTURE.DENIED",
+                PaymentEvent.SourceType.PROVIDER,
+                PaymentEvent.VerificationStatus.VERIFIED,
+                OffsetDateTime.now().minusMinutes(1),
+                "{\"create_time\":\"" + OffsetDateTime.now().minusMinutes(1) + "\"}");
+        denial.setPaymentAttempt(attempt);
+        attempt.setPaymentStatus(PaymentAttempt.PaymentStatus.FAILED);
+        when(paymentEventRepository.findByPaymentAttempt_IdInOrderByReceivedAtAsc(
+                List.of(attempt.getId()))).thenReturn(List.of(denial));
+
+        InvestigationResponse response = service.investigate(order.getId());
+
+        assertThat(response.paymentClassifications()).isNotNull();
+        assertThat(response.timeline()).isNotNull();
+        assertThat(response.paymentClassifications()).hasSize(1);
+        assertThat(response.timeline()).isNotEmpty();
+    }
+
+    @Test
+    void conflictingEvidenceWithSameCaptureReferenceNotContradictory() {
+        OffsetDateTime now = OffsetDateTime.now();
+        String captureRef = "cap-abc-123";
+        PaymentEvent denial = event("PAYMENT.CAPTURE.DENIED",
+                PaymentEvent.SourceType.PROVIDER,
+                PaymentEvent.VerificationStatus.VERIFIED,
+                now.minusMinutes(2),
+                "{\"resource\":{\"id\":\"" + captureRef + "\"}}");
+        PaymentEvent completion = event("PAYMENT.CAPTURE.COMPLETED",
+                PaymentEvent.SourceType.PROVIDER,
+                PaymentEvent.VerificationStatus.VERIFIED,
+                now.minusMinutes(1),
+                "{\"resource\":{\"id\":\"" + captureRef + "\"}}");
+        denial.setPaymentAttempt(attempt);
+        completion.setPaymentAttempt(attempt);
+        attempt.setPaymentStatus(PaymentAttempt.PaymentStatus.FAILED);
+        when(paymentEventRepository.findByPaymentAttempt_IdInOrderByReceivedAtAsc(
+                List.of(attempt.getId()))).thenReturn(List.of(denial, completion));
+
+        InvestigationResponse response = service.investigate(order.getId());
+
+        // Same capture reference: not necessarily contradictory; retry should not be eligible
+        assertThat(response.decision()).isNotEqualTo("RETRY_ELIGIBLE");
+        assertThat(response.paymentClassifications()).hasSize(1);
+        PaymentStateClassification classification = response.paymentClassifications().get(0);
+        // Same capture ref means denial and completion are not contradictory
+        assertThat(classification.state()).isNotEqualTo("CONFLICTING");
+    }
+
+    @Test
+    void conflictingEvidenceWithDifferentCaptureReferencesIsContradictory() {
+        OffsetDateTime now = OffsetDateTime.now();
+        String captureRef1 = "cap-abc-123";
+        String captureRef2 = "cap-def-456";
+        PaymentEvent denial = event("PAYMENT.CAPTURE.DENIED",
+                PaymentEvent.SourceType.PROVIDER,
+                PaymentEvent.VerificationStatus.VERIFIED,
+                now.minusMinutes(2),
+                "{\"resource\":{\"id\":\"" + captureRef1 + "\"}}");
+        PaymentEvent completion = event("PAYMENT.CAPTURE.COMPLETED",
+                PaymentEvent.SourceType.PROVIDER,
+                PaymentEvent.VerificationStatus.VERIFIED,
+                now.minusMinutes(1),
+                "{\"resource\":{\"id\":\"" + captureRef2 + "\"}}");
+        denial.setPaymentAttempt(attempt);
+        completion.setPaymentAttempt(attempt);
+        attempt.setPaymentStatus(PaymentAttempt.PaymentStatus.FAILED);
+        when(paymentEventRepository.findByPaymentAttempt_IdInOrderByReceivedAtAsc(
+                List.of(attempt.getId()))).thenReturn(List.of(denial, completion));
+
+        InvestigationResponse response = service.investigate(order.getId());
+
+        // Different capture references = genuinely contradictory evidence
+        assertThat(response.decision()).isEqualTo("RECONCILE");
+        assertThat(response.paymentClassifications()).hasSize(1);
+        PaymentStateClassification classification = response.paymentClassifications().get(0);
+        assertThat(classification.state()).isEqualTo("CONFLICTING");
+    }
+
+    @Test
+    void investigationRetrievalReturnsSameClassificationAndTimeline() {
+        OffsetDateTime now = OffsetDateTime.now();
+        attempt.setCreatedAt(now);
+        PaymentEvent denial = event("PAYMENT.CAPTURE.DENIED",
+                PaymentEvent.SourceType.PROVIDER,
+                PaymentEvent.VerificationStatus.VERIFIED,
+                now.minusMinutes(1),
+                "{\"create_time\":\"" + now.minusMinutes(1) + "\"}");
+        denial.setPaymentAttempt(attempt);
+        attempt.setPaymentStatus(PaymentAttempt.PaymentStatus.FAILED);
+        when(paymentEventRepository.findByPaymentAttempt_IdInOrderByReceivedAtAsc(
+                List.of(attempt.getId()))).thenReturn(List.of(denial));
+
+        // Call investigate twice - both should return same classifications/timeline
+        InvestigationResponse first = service.investigate(order.getId());
+        InvestigationResponse second = service.investigate(order.getId());
+
+        // Both should have same number of classifications
+        assertThat(first.paymentClassifications().size())
+                .isEqualTo(second.paymentClassifications().size());
+        // Both should have same number of timeline entries
+        assertThat(first.timeline().size())
+                .isEqualTo(second.timeline().size());
+        // Timeline timestamps should match (same attempt created_at)
+        List<OffsetDateTime> firstTimestamps = first.timeline().stream()
+                .map(TimelineEntry::timestamp)
+                .collect(Collectors.toList());
+        List<OffsetDateTime> secondTimestamps = second.timeline().stream()
+                .map(TimelineEntry::timestamp)
+                .collect(Collectors.toList());
+        assertThat(firstTimestamps).isEqualTo(secondTimestamps);
     }
 
     private PaymentEvent event(

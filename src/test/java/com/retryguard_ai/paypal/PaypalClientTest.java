@@ -55,7 +55,8 @@ class PaypalClientTest {
                 .andExpect(content().json(
                         "{\"intent\":\"CAPTURE\",\"purchase_units\":[{"
                                 + "\"reference_id\":\"merchant-ref\",\"amount\":{"
-                                + "\"currency_code\":\"USD\",\"value\":\"42.75\"}}],"
+                                + "\"currency_code\":\"USD\",\"value\":\"42.75\"},"
+                                + "\"payments\":null}],"
                                 + "\"payment_source\":{\"paypal\":{\"experience_context\":{"
                                 + "\"return_url\":\"https://retryguard.ngrok.app/api/payment-attempts/"
                                 + attempt.getId() + "/paypal/return\","
@@ -354,6 +355,103 @@ class PaypalClientTest {
                         tools.jackson.databind.node.JsonNodeFactory.instance.objectNode()));
 
         assertEquals(HttpStatus.SERVICE_UNAVAILABLE, exception.getStatus());
+        server.verify();
+    }
+
+    @Test
+    void diagnosesOrderWithReferenceIdExtractedFromPurchaseUnit() {
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        PaypalClient client = new PaypalClient(
+                builder.build(), new PaypalProperties("sandbox-client", "sandbox-secret"));
+
+        server.expect(requestTo(SANDBOX_API + "/v1/oauth2/token"))
+                .andRespond(withSuccess("{\"access_token\":\"sandbox-token\"}",
+                        MediaType.APPLICATION_JSON));
+        server.expect(requestTo(SANDBOX_API + "/v2/checkout/orders/ORDER-123"))
+                .andExpect(method(HttpMethod.GET))
+                .andRespond(withSuccess(
+                        "{\"id\":\"ORDER-123\",\"status\":\"COMPLETED\","
+                                + "\"intent\":\"CAPTURE\","
+                                + "\"purchase_units\":[{"
+                                + "\"reference_id\":\"merchant-ref-123\","
+                                + "\"amount\":{\"currency_code\":\"USD\",\"value\":\"42.75\"},"
+                                + "\"payments\":null}],"
+                                + "\"links\":[]}",
+                        MediaType.APPLICATION_JSON));
+
+        PaypalClient.PaypalOrderDiagnostic result =
+                client.diagnoseOrder("ORDER-123");
+
+        assertEquals(200, result.httpStatus());
+        assertEquals("merchant-ref-123", result.purchaseUnits().get(0).referenceId());
+        assertEquals("USD", result.purchaseUnits().get(0).currencyCode());
+        assertEquals("42.75", result.purchaseUnits().get(0).value());
+        server.verify();
+    }
+
+    @Test
+    void diagnosesOrderWithMissingReferenceId() {
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        PaypalClient client = new PaypalClient(
+                builder.build(), new PaypalProperties("sandbox-client", "sandbox-secret"));
+
+        server.expect(requestTo(SANDBOX_API + "/v1/oauth2/token"))
+                .andRespond(withSuccess("{\"access_token\":\"sandbox-token\"}",
+                        MediaType.APPLICATION_JSON));
+        server.expect(requestTo(SANDBOX_API + "/v2/checkout/orders/ORDER-123"))
+                .andExpect(method(HttpMethod.GET))
+                .andRespond(withSuccess(
+                        "{\"id\":\"ORDER-123\",\"status\":\"COMPLETED\","
+                                + "\"intent\":\"CAPTURE\","
+                                + "\"purchase_units\":[{"
+                                + "\"amount\":{\"currency_code\":\"USD\",\"value\":\"42.75\"},"
+                                + "\"payments\":null}],"
+                                + "\"links\":[]}",
+                        MediaType.APPLICATION_JSON));
+
+        PaypalClient.PaypalOrderDiagnostic result =
+                client.diagnoseOrder("ORDER-123");
+
+        assertEquals(200, result.httpStatus());
+        assertNull(result.purchaseUnits().get(0).referenceId());
+        server.verify();
+    }
+
+    @Test
+    void diagnosesOrderWithCompletedCaptureAndReferenceId() {
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        PaypalClient client = new PaypalClient(
+                builder.build(), new PaypalProperties("sandbox-client", "sandbox-secret"));
+
+        server.expect(requestTo(SANDBOX_API + "/v1/oauth2/token"))
+                .andRespond(withSuccess("{\"access_token\":\"sandbox-token\"}",
+                        MediaType.APPLICATION_JSON));
+        server.expect(requestTo(SANDBOX_API + "/v2/checkout/orders/ORDER-123"))
+                .andExpect(method(HttpMethod.GET))
+                .andRespond(withSuccess(
+                        "{\"id\":\"ORDER-123\",\"status\":\"COMPLETED\","
+                                + "\"intent\":\"CAPTURE\","
+                                + "\"purchase_units\":[{"
+                                + "\"reference_id\":\"merchant-ref-123\","
+                                + "\"amount\":{\"currency_code\":\"USD\",\"value\":\"42.75\"},"
+                                + "\"payments\":{\"captures\":[{"
+                                + "\"id\":\"CAPTURE-456\",\"status\":\"COMPLETED\","
+                                + "\"amount\":{\"currency_code\":\"USD\",\"value\":\"42.75\"}}]}}],"
+                                + "\"links\":[]}",
+                        MediaType.APPLICATION_JSON));
+
+        PaypalClient.PaypalOrderDiagnostic result =
+                client.diagnoseOrder("ORDER-123");
+
+        assertEquals(200, result.httpStatus());
+        assertEquals("merchant-ref-123", result.purchaseUnits().get(0).referenceId());
+        assertEquals("CAPTURE-456", result.purchaseUnits().get(0).captureId());
+        assertEquals("COMPLETED", result.purchaseUnits().get(0).captureStatus());
+        assertEquals("42.75", result.purchaseUnits().get(0).captureAmount());
+        assertEquals("USD", result.purchaseUnits().get(0).captureCurrency());
         server.verify();
     }
 

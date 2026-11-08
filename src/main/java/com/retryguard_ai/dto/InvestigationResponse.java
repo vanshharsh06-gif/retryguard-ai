@@ -13,6 +13,8 @@ public record InvestigationResponse(
         String explanation,
         EvidenceSnapshot evidence,
         List<AutopsyFinding> findings,
+        List<PaymentStateClassification> paymentClassifications,
+        List<TimelineEntry> timeline,
         OffsetDateTime createdAt) {
 
     public InvestigationResponse(
@@ -24,7 +26,7 @@ public record InvestigationResponse(
             String explanation,
             EvidenceSnapshot evidence,
             OffsetDateTime createdAt) {
-        this(id, orderId, decision, reason, rulesVersion, explanation, evidence, List.of(), createdAt);
+        this(id, orderId, decision, reason, rulesVersion, explanation, evidence, List.of(), List.of(), List.of(), createdAt);
     }
 
     public record EvidenceSnapshot(
@@ -38,6 +40,7 @@ public record InvestigationResponse(
             UUID paymentAttemptId,
             String provider,
             String paymentStatus,
+            OffsetDateTime createdAt,
             List<EventEvidence> events) {
     }
 
@@ -52,6 +55,24 @@ public record InvestigationResponse(
             OffsetDateTime effectiveEvidenceAt,
             String timestampSource,
             String freshness,
-            boolean trustedPayPalEvidence) {
+            boolean trustedPayPalEvidence,
+            String providerEventId,
+            String captureReference) {
+    }
+
+    public record PaymentStateClassification(
+            UUID paymentAttemptId,
+            String state,
+            String reason,
+            List<UUID> supportingEvidenceIds) {
+    }
+
+    public record TimelineEntry(
+            OffsetDateTime timestamp,
+            OffsetDateTime receivedAt,
+            String source,
+            String eventType,
+            String description,
+            String evidenceType) {
     }
 }

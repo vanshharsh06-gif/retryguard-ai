@@ -33,6 +33,12 @@
 			<artifactId>spring-boot-starter-webmvc</artifactId>
 		</dependency>
 
+		<!-- Spring Security for API authentication and authorization -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-security</artifactId>
+		</dependency>
+
 		<!-- JSON request/response serialization and payload handling -->
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
@@ -78,6 +84,13 @@
 			<optional>true</optional>
 		</dependency>
 
+		<!-- Spring Security test support -->
+		<dependency>
+			<groupId>org.springframework.security</groupId>
+			<artifactId>spring-security-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+
 		<!-- Testing -->
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
@@ -85,9 +98,39 @@
 			<scope>test</scope>
 		</dependency>
 
+		<!-- Testcontainers for PostgreSQL integration tests -->
+		<dependency>
+			<groupId>org.testcontainers</groupId>
+			<artifactId>testcontainers</artifactId>
+			<version>1.20.4</version>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.testcontainers</groupId>
+			<artifactId>postgresql</artifactId>
+			<version>1.20.4</version>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.testcontainers</groupId>
+			<artifactId>junit-jupiter</artifactId>
+			<version>1.20.4</version>
+			<scope>test</scope>
+		</dependency>
+
 	</dependencies>
 
 	<build>
+		<resources>
+			<resource>
+				<directory>src/main/resources</directory>
+				<excludes>
+					<exclude>**/application-local.yaml</exclude>
+					<exclude>**/application-local.yml</exclude>
+					<exclude>**/application-local.properties</exclude>
+				</excludes>
+			</resource>
+		</resources>
 		<plugins>
 
 			<!-- Compiler plugin for annotation processing -->

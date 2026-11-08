@@ -11,14 +11,36 @@ import com.retryguard_ai.entity.MerchantOrder;
 import com.retryguard_ai.repository.AgentWorkflowRepository;
 import com.retryguard_ai.repository.AgentWorkflowStepRepository;
 import com.retryguard_ai.repository.MerchantOrderRepository;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.jdbc.support.SQLErrorCodeSQLExceptionTranslator;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import tools.jackson.databind.ObjectMapper;
 
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
+/**
+ * Agent workflow orchestration service.
+ *
+ * Transaction boundaries are carefully separated from external network calls:
+ *
+ * <ul>
+ *   <li>The RUNNING workflow is persisted and committed via
+ *       {@link AgentWorkflowPersistenceService#persistRunning(AgentWorkflow)}
+ *       <b>before</b> any Groq HTTP call is made.</li>
+ *   <li>The Groq agent execution ({@link AgentOrchestrator#runWorkflow}) runs
+ *       <b>without</b> an active database transaction.</li>
+ *   <li>Workflow results, steps, and ERROR status are persisted using separate
+ *       short transactions via {@link AgentWorkflowPersistenceService}.</li>
+ *   <li>ERROR persistence uses {@code PROPAGATION_REQUIRES_NEW} through a
+ *       separate Spring-managed bean so self-invocation cannot bypass the
+ *       transactional proxy.</li>
+ * </ul>
+ */
 @Service
 public class AgentWorkflowService {
 
@@ -28,6 +50,8 @@ public class AgentWorkflowService {
     private final MerchantOrderRepository orderRepository;
     private final ReconciliationSafetyService reconciliationService;
     private final AgentProperties agentProperties;
+    private final AgentWorkflowPersistenceService persistenceService;
+    private final ObjectMapper objectMapper;
 
     public AgentWorkflowService(
             AgentOrchestrator agentOrchestrator,
@@ -35,17 +59,37 @@ public class AgentWorkflowService {
             AgentWorkflowStepRepository stepRepository,
             MerchantOrderRepository orderRepository,
             ReconciliationSafetyService reconciliationService,
-            AgentProperties agentProperties) {
+            AgentProperties agentProperties,
+            AgentWorkflowPersistenceService persistenceService,
+            ObjectMapper objectMapper) {
         this.agentOrchestrator = agentOrchestrator;
         this.workflowRepository = workflowRepository;
         this.stepRepository = stepRepository;
         this.orderRepository = orderRepository;
         this.reconciliationService = reconciliationService;
         this.agentProperties = agentProperties;
+        this.persistenceService = persistenceService;
+        this.objectMapper = objectMapper;
     }
 
-    @Transactional
+    /**
+     * Execute the agent workflow for the given order.
+     *
+     * <p>Transaction boundaries:
+     * <ol>
+     *   <li>Validate order and check for existing RUNNING workflow (read-only).</li>
+     *   <li>Persist RUNNING workflow via {@code persistenceService.persistRunning}
+ *       — short transaction, committed before Groq call.</li>
+     *   <li>Execute Groq agent workflow — <b>no database transaction active</b>.</li>
+     *   <li>Persist results/steps via {@code persistenceService.persistCompleted}
+ *       — short transaction.</li>
+     *   <li>On exception, persist ERROR via
+ *       {@code persistenceService.persistError} — {@code REQUIRES_NEW},
+ *       committed independently even if outer transaction rolls back.</li>
+     * </ol>
+     */
     public AgentWorkflowResponse runWorkflow(UUID orderId) {
+        // Validate the order first (read-only)
         MerchantOrder order = orderRepository.findById(orderId)
                 .orElseThrow(() -> new IllegalArgumentException("Order not found: " + orderId));
 
@@ -57,87 +101,144 @@ public class AgentWorkflowService {
             return createSkippedWorkflow(orderId, "AGENT_DISABLED", "Agent is disabled via configuration");
         }
 
+        // Check for existing running workflow (application-level guard;
+        // DB partial unique index enforces at database level)
         var runningWorkflow = workflowRepository.findRunningByOrderId(orderId);
         if (runningWorkflow.isPresent()) {
-            return createSkippedWorkflow(orderId, "WORKFLOW_ALREADY_RUNNING", "A workflow is already running for this order");
+            return createSkippedWorkflow(orderId, "WORKFLOW_ALREADY_RUNNING",
+                    "A workflow is already running for this order");
         }
 
+        // Create and persist RUNNING workflow, commit before external call
         AgentWorkflow workflow = new AgentWorkflow();
         workflow.setOrder(order);
         workflow.setStatus("RUNNING");
         workflow.setStartedAt(OffsetDateTime.now());
         workflow.setProviderName("GROQ");
-        AgentWorkflow saved = workflowRepository.saveAndFlush(workflow);
-
+        AgentWorkflow saved;
         try {
-            // Execute agent workflow outside of transaction - will be managed by outer
-            GroqAgentProvider.AgentRunResult result = agentOrchestrator.runWorkflow(orderId.toString());
-
-            // Now update workflow status within transaction
-            saved.setStatus(result.status());
-            saved.setSummary(result.summary());
-            saved.setToolCallsUsed(result.toolCallsUsed());
-            saved.setModelTurnsUsed(result.modelTurnsUsed());
-            saved.setCompletedAt(OffsetDateTime.now());
-
-            if (result.usage() != null) {
-                saved.setPromptTokens(result.usage().promptTokens());
-                saved.setCompletionTokens(result.usage().completionTokens());
-                saved.setTotalTokens(result.usage().totalTokens());
+            saved = persistenceService.persistRunning(workflow);
+        } catch (DataIntegrityViolationException e) {
+            // Check if this is the specific PostgreSQL partial unique index violation
+            // for one RUNNING workflow per order. Propagate unrelated DB errors.
+            if (isWorkflowConcurrencyViolation(e)) {
+                // Another concurrent request created a RUNNING workflow for this order.
+                // Return conflict response — do NOT invoke Groq.
+                return createSkippedWorkflow(orderId, "WORKFLOW_ALREADY_RUNNING",
+                        "A workflow is already running for this order (database constraint)");
             }
+            throw e;
+        }
 
-            workflowRepository.save(saved);
-
-            for (GroqAgentProvider.AgentStep step : result.steps()) {
-                AgentWorkflowStep stepEntity = new AgentWorkflowStep();
-                stepEntity.setWorkflow(saved);
-                stepEntity.setStepType(step.type());
-                stepEntity.setStepName(step.name());
-                stepEntity.setInputSummary(step.input() != null ? step.input().toString() : null);
-                stepEntity.setOutputSummary(step.output() != null ? step.output().toString() : null);
-                stepEntity.setError(step.error());
-                stepEntity.setCreatedAt(OffsetDateTime.now());
-                stepRepository.save(stepEntity);
-            }
-
-            // Handle reconciliation recommendation outside of the main transaction context
-            // to avoid keeping DB transaction open during HTTP calls to PayPal
-            if ("RECONCILE_LOCAL_ORDER".equals(result.summary())) {
-                UUID attemptId = extractAttemptIdFromSteps(result.steps());
-                if (attemptId != null) {
-                    // Reconciliation is handled by the separate Java safety service
-                    // which performs verified local reconciliation without open transaction
-                    ReconciliationSafetyService.ReconciliationResult reconResult =
-                            reconciliationService.reconcileIfAuthorized(orderId, attemptId);
-                    if (reconResult.success()) {
-                        saved.setStatus("RECONCILED");
-                        saved.setSummary("RECONCILED: " + reconResult.message());
-                    } else {
-                        saved.setStatus("ESCALATED");
-                        saved.setSummary("RECONCILIATION_FAILED: " + reconResult.message());
-                    }
-                    workflowRepository.save(saved);
-                } else {
-                    saved.setStatus("WAITING_FOR_EVIDENCE");
-                    saved.setSummary("WAITING_FOR_EVIDENCE: No attempt ID found in verification steps");
-                    workflowRepository.save(saved);
-                }
-            } else if ("WAIT_FOR_WEBHOOK".equals(result.summary())) {
-                saved.setStatus("WAITING_FOR_WEBHOOK");
-                workflowRepository.save(saved);
-            } else if ("ESCALATE".equals(result.summary())) {
-                saved.setStatus("ESCALATED");
-                workflowRepository.save(saved);
-            }
-
-            return toResponse(saved);
+        // Execute Groq agent workflow WITHOUT an open database transaction.
+        // The Spring transactional proxy is NOT involved here — no DB
+        // connection is held while waiting for the Groq HTTP response.
+        GroqAgentProvider.AgentRunResult result;
+        try {
+            result = agentOrchestrator.runWorkflow(orderId.toString());
         } catch (Exception e) {
-            saved.setStatus("ERROR");
-            saved.setSummary("Workflow execution failed: " + e.getMessage());
-            saved.setCompletedAt(OffsetDateTime.now());
-            workflowRepository.save(saved);
+            // Persist ERROR independently so it is not rolled back.
+            // Invoked through the separate persistenceService bean so
+            // PROPAGATION_REQUIRES_NEW is honored by the Spring proxy.
+            persistenceService.persistError(saved, e);
             throw new RuntimeException("Agent workflow failed", e);
         }
+
+        // Persist final status and steps using short transactions
+        return persistResults(saved, result);
+    }
+
+    /**
+     * Persist final workflow status, counters, steps, and reconciliation
+     * outcome using short transactions via the persistence service.
+     * Steps are persisted BEFORE the workflow status is set to COMPLETED,
+     * ensuring a step persistence failure cannot leave a misleading COMPLETED workflow.
+     * All transactional database work is delegated to
+     * AgentWorkflowPersistenceService, which is a separate Spring-managed
+     * bean with proper @Transactional annotations.
+     */
+    private AgentWorkflowResponse persistResults(AgentWorkflow workflow, GroqAgentProvider.AgentRunResult result) {
+        workflow.setStatus(result.status());
+        workflow.setSummary(result.summary());
+        workflow.setToolCallsUsed(result.toolCallsUsed());
+        workflow.setModelTurnsUsed(result.modelTurnsUsed());
+        workflow.setCompletedAt(OffsetDateTime.now());
+
+        if (result.usage() != null) {
+            workflow.setPromptTokens(result.usage().promptTokens());
+            workflow.setCompletionTokens(result.usage().completionTokens());
+            workflow.setTotalTokens(result.usage().totalTokens());
+        }
+
+        // Persist all workflow steps FIRST, before marking the workflow COMPLETED.
+        // If any step persistence fails, an ERROR status will be persisted instead.
+        boolean stepsFailed = false;
+        for (GroqAgentProvider.AgentStep step : result.steps()) {
+            AgentWorkflowStep stepEntity = new AgentWorkflowStep();
+            stepEntity.setWorkflow(workflow);
+            stepEntity.setStepType(step.type());
+            stepEntity.setStepName(step.name());
+            try {
+                stepEntity.setInputSummary(step.input() != null ? objectMapper.writeValueAsString(step.input()) : null);
+            } catch (Exception e) {
+                stepEntity.setInputSummary("{\"error\": \"serialization failed\"}");
+            }
+            try {
+                stepEntity.setOutputSummary(step.output() != null ? objectMapper.writeValueAsString(step.output()) : null);
+            } catch (Exception e) {
+                stepEntity.setOutputSummary("{\"error\": \"serialization failed\"}");
+            }
+            stepEntity.setError(step.error());
+            stepEntity.setCreatedAt(OffsetDateTime.now());
+            try {
+                persistenceService.persistStep(stepEntity);
+            } catch (Exception e) {
+                stepsFailed = true;
+                break;
+            }
+        }
+
+        if (stepsFailed) {
+            // Step persistence failed — persist ERROR status independently
+            workflow.setStatus("ERROR");
+            workflow.setSummary("Workflow execution failed: Step persistence error");
+            workflow.setCompletedAt(OffsetDateTime.now());
+            persistenceService.persistError(workflow, new RuntimeException("Step persistence failed"));
+            return toResponse(workflow);
+        }
+
+        AgentWorkflow saved = persistenceService.persistCompleted(workflow);
+
+        // Handle reconciliation recommendation — reconciliation service uses
+        // its own transaction and performs independent Java-side provider
+        // verification before any local payment-state change.
+        if ("RECONCILE_LOCAL_ORDER".equals(result.summary())) {
+            UUID attemptId = extractAttemptIdFromSteps(result.steps());
+            if (attemptId != null) {
+                ReconciliationSafetyService.ReconciliationResult reconResult =
+                        reconciliationService.reconcileIfAuthorized(saved.getOrder().getId(), attemptId);
+                if (reconResult.success()) {
+                    saved.setStatus("RECONCILED");
+                    saved.setSummary("RECONCILED: " + reconResult.message());
+                } else {
+                    saved.setStatus("ESCALATED");
+                    saved.setSummary("RECONCILIATION_FAILED: " + reconResult.message());
+                }
+                persistenceService.persistCompleted(saved);
+            } else {
+                saved.setStatus("WAITING_FOR_EVIDENCE");
+                saved.setSummary("WAITING_FOR_EVIDENCE: No attempt ID found in verification steps");
+                persistenceService.persistCompleted(saved);
+            }
+        } else if ("WAIT_FOR_WEBHOOK".equals(result.summary())) {
+            saved.setStatus("WAITING_FOR_WEBHOOK");
+            persistenceService.persistCompleted(saved);
+        } else if ("ESCALATE".equals(result.summary())) {
+            saved.setStatus("ESCALATED");
+            persistenceService.persistCompleted(saved);
+        }
+
+        return toResponse(saved);
     }
 
     private UUID extractAttemptIdFromSteps(List<GroqAgentProvider.AgentStep> steps) {
@@ -222,7 +323,38 @@ public class AgentWorkflowService {
         workflow.setSummary(code + ": " + message);
         workflow.setStartedAt(OffsetDateTime.now());
         workflow.setCompletedAt(OffsetDateTime.now());
-        AgentWorkflow saved = workflowRepository.save(workflow);
+        AgentWorkflow saved = persistenceService.persistRunning(workflow);
         return toResponse(saved);
+    }
+
+    /**
+     * Check if a DataIntegrityViolationException is caused by the PostgreSQL
+     * partial unique index uq_agent_workflows_one_running_per_order.
+     * This is the specific constraint that enforces one RUNNING workflow per order.
+     * Unrelated database constraint violations are propagated.
+     */
+    private boolean isWorkflowConcurrencyViolation(DataIntegrityViolationException e) {
+        if (e == null) {
+            return false;
+        }
+
+        // Inspect the exception chain for a PostgreSQL constraint violation
+        // referencing the specific constraint name.
+        Throwable cause = e.getCause();
+        while (cause != null) {
+            String message = cause.toString();
+            if (message != null && message.contains("uq_agent_workflows_one_running_per_order")) {
+                return true;
+            }
+            cause = cause.getCause();
+        }
+
+        // Also check the top-level DataIntegrityViolationException message
+        String message = e.getMessage();
+        if (message != null && message.contains("uq_agent_workflows_one_running_per_order")) {
+            return true;
+        }
+
+        return false;
     }
 }

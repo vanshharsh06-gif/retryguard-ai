@@ -8,6 +8,7 @@ import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestClientResponseException;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ArrayNode;
@@ -44,16 +45,25 @@ public class GroqAgentProvider {
     private final ObjectMapper objectMapper;
 
     public GroqAgentProvider(RestClient.Builder builder, AgentProperties properties, ObjectMapper objectMapper) {
-        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout((int) Duration.ofSeconds(properties.timeoutSeconds()).toMillis());
-        factory.setReadTimeout((int) Duration.ofSeconds(properties.timeoutSeconds()).toMillis());
-        
-        this.restClient = builder
-                .baseUrl(properties.groq().baseUrl())
-                .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
-                .defaultHeader(HttpHeaders.AUTHORIZATION, "Bearer " + properties.groq().apiKey())
-                .requestFactory(factory)
-                .build();
+        this(builder, properties, objectMapper, null);
+    }
+
+    // Package-private constructor for testing with pre-configured RestClient
+    GroqAgentProvider(RestClient.Builder builder, AgentProperties properties, ObjectMapper objectMapper, RestClient restClient) {
+        if (restClient != null) {
+            this.restClient = restClient;
+        } else {
+            SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+            factory.setConnectTimeout((int) Duration.ofSeconds(properties.timeoutSeconds()).toMillis());
+            factory.setReadTimeout((int) Duration.ofSeconds(properties.timeoutSeconds()).toMillis());
+
+            this.restClient = builder
+                    .baseUrl(properties.groq().baseUrl())
+                    .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
+                    .defaultHeader(HttpHeaders.AUTHORIZATION, "Bearer " + properties.groq().apiKey())
+                    .requestFactory(factory)
+                    .build();
+        }
         this.properties = properties;
         this.objectMapper = objectMapper;
     }
@@ -107,16 +117,23 @@ public class GroqAgentProvider {
                     }
                     toolCalls++;
 
-                    ToolDefinition toolDef = toolMap.get(toolCall.name());
+                    String toolName = toolCall.name();
+                    if (toolName == null || toolName.isBlank()) {
+                        steps.add(new AgentStep("ERROR", "missing_tool_name", Map.of("toolCallId", toolCall.id()), null, null));
+                        return new AgentRunResult("INVALID_TOOL", "Tool call missing function name", steps, toolCalls, modelTurns, null);
+                    }
+
+                    ToolDefinition toolDef = toolMap.get(toolName);
                     if (toolDef == null) {
-                        steps.add(new AgentStep("ERROR", "unknown_tool", Map.of("tool", toolCall.name()), null, null));
-                        return new AgentRunResult("INVALID_TOOL", "Unknown tool: " + toolCall.name(), steps, toolCalls, modelTurns, null);
+                        steps.add(new AgentStep("ERROR", "unknown_tool", Map.of("tool", toolName), null, null));
+                        return new AgentRunResult("INVALID_TOOL", "Unknown tool: " + toolName, steps, toolCalls, modelTurns, null);
                     }
 
                     Object toolResult;
                     try {
-                        toolResult = toolDef.execute(toolCall.arguments());
+                        toolResult = toolDef.execute(toolCall.parsedArguments(objectMapper));
                     } catch (Exception e) {
+                        e.printStackTrace();
                         steps.add(new AgentStep("ERROR", "tool_execution_failed", Map.of("tool", toolCall.name(), "error", e.getMessage()), null, null));
                         return new AgentRunResult("TOOL_ERROR", "Tool execution failed: " + e.getMessage(), steps, toolCalls, modelTurns, null);
                     }
@@ -125,8 +142,9 @@ public class GroqAgentProvider {
                     messages.add(new ChatMessage("tool", toolCall.id(), objectMapper.valueToTree(toolResult).toString()));
 
                     if ("final_recommendation".equals(toolCall.name())) {
-                        String recommendation = (String) ((Map<?, ?>) toolCall.arguments()).get("recommendation");
-                        String reason = (String) ((Map<?, ?>) toolCall.arguments()).get("reason");
+                        Map<?, ?> parsedArgs = (Map<?, ?>) toolCall.parsedArguments(objectMapper);
+                        String recommendation = (String) parsedArgs.get("recommendation");
+                        String reason = (String) parsedArgs.get("reason");
                         steps.add(new AgentStep("RECOMMENDATION", recommendation, Map.of("reason", reason), null, null));
                         return new AgentRunResult("COMPLETED", recommendation, steps, toolCalls, modelTurns, response.usage());
                     }
@@ -147,7 +165,7 @@ public class GroqAgentProvider {
         try {
             ObjectNode requestBody = objectMapper.createObjectNode();
             requestBody.put("model", properties.groq().model());
-            
+
             ArrayNode messagesArray = objectMapper.createArrayNode();
             for (ChatMessage msg : messages) {
                 ObjectNode msgNode = objectMapper.createObjectNode();
@@ -166,7 +184,19 @@ public class GroqAgentProvider {
                         tcNode.put("type", "function");
                         ObjectNode funcNode = objectMapper.createObjectNode();
                         funcNode.put("name", tc.name());
-                        funcNode.put("arguments", objectMapper.writeValueAsString(tc.arguments()));
+                        Object arguments = tc.arguments();
+                        String argumentsJson;
+                        if (arguments instanceof String str) {
+                            // Groq returns function arguments as a JSON string.
+                            // Preserve it; serializing it again would double-escape the JSON.
+                            argumentsJson = str;
+                        } else if (arguments == null) {
+                            argumentsJson = "{}";
+                        } else {
+                            // Also support providers/tests that deserialize arguments as an object.
+                            argumentsJson = objectMapper.writeValueAsString(arguments);
+                        }
+                        funcNode.put("arguments", argumentsJson);
                         tcNode.set("function", funcNode);
                         toolCallsArray.add(tcNode);
                     }
@@ -252,8 +282,8 @@ public class GroqAgentProvider {
     private record ChatMessage(
             String role,
             String content,
-            String toolCallId,
-            List<ToolCall> toolCalls
+            @JsonProperty("tool_call_id") String toolCallId,
+            @JsonProperty("tool_calls") List<ToolCall> toolCalls
     ) {
         public ChatMessage(String role, String content) {
             this(role, content, null, null);
@@ -264,11 +294,53 @@ public class GroqAgentProvider {
         }
     }
 
-    private record ToolCall(String id, String type, String name, Object arguments) {}
+    private record ToolCall(
+            String id,
+            String type,
+            @JsonProperty("function") Function function
+    ) {
+        public String name() {
+            return function != null ? function.name() : null;
+        }
 
-    private record ChatCompletionResponse(List<Choice> choices, Usage usage) {}
+        public Object arguments() {
+            return function != null ? function.arguments() : null;
+        }
+
+        public Object parsedArguments(ObjectMapper objectMapper) {
+            return function != null ? function.parsedArguments(objectMapper) : null;
+        }
+    }
+
+    private record Function(
+            String name,
+            @JsonProperty("arguments") Object arguments
+    ) {
+        public Object parsedArguments(ObjectMapper objectMapper) {
+            if (arguments == null) {
+                return Map.of();
+            }
+            if (arguments instanceof String str) {
+                try {
+                    return objectMapper.readValue(str, Map.class);
+                } catch (Exception e) {
+                    return Map.of();
+                }
+            }
+            return arguments;
+        }
+    }
+
+    private record ChatCompletionResponse(
+            List<Choice> choices,
+            @JsonProperty("usage") Usage usage
+    ) {}
     private record Choice(ChatMessage message) {}
-    public record Usage(Integer promptTokens, Integer completionTokens, Integer totalTokens) {}
+    public record Usage(
+            @JsonProperty("prompt_tokens") Integer promptTokens,
+            @JsonProperty("completion_tokens") Integer completionTokens,
+            @JsonProperty("total_tokens") Integer totalTokens
+    ) {}
 
     public static class GroqProviderException extends RuntimeException {
         public GroqProviderException(String message) {

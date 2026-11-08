@@ -61,16 +61,20 @@ class ReconciliationSafetyServiceTest {
         attempt.setPaymentStatus(PaymentAttempt.PaymentStatus.PENDING);
     }
 
+    private PaypalOrderUnitDiagnostic completedCaptureUnit() {
+        return new PaypalOrderUnitDiagnostic(
+                "order-ref-123", "USD", "100.00",
+                "CAPTURE-456", "COMPLETED", "100.00", "USD");
+    }
+
     @Test
     void reconcilesSuccessfullyWhenAllConditionsMet() {
-        attempt.setProviderCaptureReference("100.00");
-        when(orderRepository.findById(orderId)).thenReturn(Optional.of(order));
-        when(attemptRepository.findById(attemptId)).thenReturn(Optional.of(attempt));
-        
-        PaypalOrderUnitDiagnostic pu = new PaypalOrderUnitDiagnostic("USD", "100.00");
+        PaypalOrderUnitDiagnostic pu = completedCaptureUnit();
         PaypalOrderDiagnostic diagnostic = new PaypalOrderDiagnostic(
                 200, "COMPLETED", "CAPTURE", List.of(pu), null, null, null, null);
         
+        when(orderRepository.findById(orderId)).thenReturn(Optional.of(order));
+        when(attemptRepository.findById(attemptId)).thenReturn(Optional.of(attempt));
         when(paypalClient.diagnoseOrder("PAYPAL-ORDER-123")).thenReturn(diagnostic);
         when(orderRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
         when(attemptRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
@@ -146,7 +150,7 @@ class ReconciliationSafetyServiceTest {
         when(orderRepository.findById(orderId)).thenReturn(Optional.of(order));
         when(attemptRepository.findById(attemptId)).thenReturn(Optional.of(attempt));
         
-        PaypalOrderUnitDiagnostic pu = new PaypalOrderUnitDiagnostic("USD", "100.00");
+        PaypalOrderUnitDiagnostic pu = new PaypalOrderUnitDiagnostic("order-ref-123", "USD", "100.00", null, null, null, null);
         PaypalOrderDiagnostic diagnostic = new PaypalOrderDiagnostic(
                 200, "APPROVED", "CAPTURE", List.of(pu), null, null, null, null);
         
@@ -179,7 +183,7 @@ class ReconciliationSafetyServiceTest {
         when(orderRepository.findById(orderId)).thenReturn(Optional.of(order));
         when(attemptRepository.findById(attemptId)).thenReturn(Optional.of(attempt));
         
-        PaypalOrderUnitDiagnostic pu = new PaypalOrderUnitDiagnostic(null, "100.00");
+        PaypalOrderUnitDiagnostic pu = new PaypalOrderUnitDiagnostic("order-ref-123", null, "100.00", null, null, null, null);
         PaypalOrderDiagnostic diagnostic = new PaypalOrderDiagnostic(
                 200, "COMPLETED", "CAPTURE", List.of(pu), null, null, null, null);
         
@@ -196,7 +200,7 @@ class ReconciliationSafetyServiceTest {
         when(orderRepository.findById(orderId)).thenReturn(Optional.of(order));
         when(attemptRepository.findById(attemptId)).thenReturn(Optional.of(attempt));
         
-        PaypalOrderUnitDiagnostic pu = new PaypalOrderUnitDiagnostic("EUR", "100.00");
+        PaypalOrderUnitDiagnostic pu = new PaypalOrderUnitDiagnostic("order-ref-123", "EUR", "100.00", null, null, null, null);
         PaypalOrderDiagnostic diagnostic = new PaypalOrderDiagnostic(
                 200, "COMPLETED", "CAPTURE", List.of(pu), null, null, null, null);
         
@@ -213,7 +217,7 @@ class ReconciliationSafetyServiceTest {
         when(orderRepository.findById(orderId)).thenReturn(Optional.of(order));
         when(attemptRepository.findById(attemptId)).thenReturn(Optional.of(attempt));
         
-        PaypalOrderUnitDiagnostic pu = new PaypalOrderUnitDiagnostic("USD", "99.00");
+        PaypalOrderUnitDiagnostic pu = new PaypalOrderUnitDiagnostic("order-ref-123", "USD", "99.00", null, null, null, null);
         PaypalOrderDiagnostic diagnostic = new PaypalOrderDiagnostic(
                 200, "COMPLETED", "CAPTURE", List.of(pu), null, null, null, null);
         
@@ -227,14 +231,12 @@ class ReconciliationSafetyServiceTest {
 
     @Test
     void failsWhenInvalidOrderIntent() {
-        attempt.setProviderCaptureReference("CAPTURE-456");
-        when(orderRepository.findById(orderId)).thenReturn(Optional.of(order));
-        when(attemptRepository.findById(attemptId)).thenReturn(Optional.of(attempt));
-        
-        PaypalOrderUnitDiagnostic pu = new PaypalOrderUnitDiagnostic("USD", "100.00");
+        PaypalOrderUnitDiagnostic pu = completedCaptureUnit();
         PaypalOrderDiagnostic diagnostic = new PaypalOrderDiagnostic(
                 200, "COMPLETED", "AUTHORIZE", List.of(pu), null, null, null, null);
         
+        when(orderRepository.findById(orderId)).thenReturn(Optional.of(order));
+        when(attemptRepository.findById(attemptId)).thenReturn(Optional.of(attempt));
         when(paypalClient.diagnoseOrder("PAYPAL-ORDER-123")).thenReturn(diagnostic);
 
         ReconciliationSafetyService.ReconciliationResult result = service.reconcileIfAuthorized(orderId, attemptId);
@@ -285,12 +287,13 @@ class ReconciliationSafetyServiceTest {
     void normalizesCurrencyCaseInsensitive() {
         order.setCurrency("usd");
         attempt.setCurrency("USD");
-        attempt.setProviderCaptureReference("100.00");
+        attempt.setProviderCaptureReference("CAPTURE-456");
         
         when(orderRepository.findById(orderId)).thenReturn(Optional.of(order));
         when(attemptRepository.findById(attemptId)).thenReturn(Optional.of(attempt));
         
-        PaypalOrderUnitDiagnostic pu = new PaypalOrderUnitDiagnostic("UsD", "100.00");
+        PaypalOrderUnitDiagnostic pu = new PaypalOrderUnitDiagnostic("order-ref-123", "UsD", "100.00",
+                "CAPTURE-456", "COMPLETED", "100.00", "USD");
         PaypalOrderDiagnostic diagnostic = new PaypalOrderDiagnostic(
                 200, "COMPLETED", "CAPTURE", List.of(pu), null, null, null, null);
         
@@ -302,5 +305,176 @@ class ReconciliationSafetyServiceTest {
 
         assertThat(result.success()).isTrue();
         assertThat(result.code()).isEqualTo("RECONCILED");
+    }
+
+    @Test
+    void failsWhenCaptureStatusNotCompleted() {
+        PaypalOrderUnitDiagnostic pu = new PaypalOrderUnitDiagnostic(
+                "order-ref-123", "USD", "100.00", "CAPTURE-456", "PENDING", "100.00", "USD");
+        PaypalOrderDiagnostic diagnostic = new PaypalOrderDiagnostic(
+                200, "COMPLETED", "CAPTURE", List.of(pu), null, null, null, null);
+        
+        when(orderRepository.findById(orderId)).thenReturn(Optional.of(order));
+        when(attemptRepository.findById(attemptId)).thenReturn(Optional.of(attempt));
+        when(paypalClient.diagnoseOrder("PAYPAL-ORDER-123")).thenReturn(diagnostic);
+
+        ReconciliationSafetyService.ReconciliationResult result = service.reconcileIfAuthorized(orderId, attemptId);
+
+        assertThat(result.success()).isFalse();
+        assertThat(result.code()).isEqualTo("CAPTURE_NOT_COMPLETED");
+    }
+
+    @Test
+    void failsWhenCaptureMissing() {
+        PaypalOrderUnitDiagnostic pu = new PaypalOrderUnitDiagnostic(
+                "order-ref-123", "USD", "100.00", null, null, null, null);
+        PaypalOrderDiagnostic diagnostic = new PaypalOrderDiagnostic(
+                200, "COMPLETED", "CAPTURE", List.of(pu), null, null, null, null);
+        
+        when(orderRepository.findById(orderId)).thenReturn(Optional.of(order));
+        when(attemptRepository.findById(attemptId)).thenReturn(Optional.of(attempt));
+        when(paypalClient.diagnoseOrder("PAYPAL-ORDER-123")).thenReturn(diagnostic);
+
+        ReconciliationSafetyService.ReconciliationResult result = service.reconcileIfAuthorized(orderId, attemptId);
+
+        assertThat(result.success()).isFalse();
+        assertThat(result.code()).isEqualTo("MISSING_CAPTURE_RECORD");
+    }
+
+    @Test
+    void failsWhenCaptureAmountMismatch() {
+        PaypalOrderUnitDiagnostic pu = new PaypalOrderUnitDiagnostic(
+                "order-ref-123", "USD", "100.00", "CAPTURE-456", "COMPLETED", "99.00", "USD");
+        PaypalOrderDiagnostic diagnostic = new PaypalOrderDiagnostic(
+                200, "COMPLETED", "CAPTURE", List.of(pu), null, null, null, null);
+        
+        when(orderRepository.findById(orderId)).thenReturn(Optional.of(order));
+        when(attemptRepository.findById(attemptId)).thenReturn(Optional.of(attempt));
+        when(paypalClient.diagnoseOrder("PAYPAL-ORDER-123")).thenReturn(diagnostic);
+
+        ReconciliationSafetyService.ReconciliationResult result = service.reconcileIfAuthorized(orderId, attemptId);
+
+        assertThat(result.success()).isFalse();
+        assertThat(result.code()).isEqualTo("CAPTURE_AMOUNT_MISMATCH");
+    }
+
+    @Test
+    void failsWhenCaptureCurrencyMismatch() {
+        PaypalOrderUnitDiagnostic pu = new PaypalOrderUnitDiagnostic(
+                "order-ref-123", "USD", "100.00", "CAPTURE-456", "COMPLETED", "100.00", "EUR");
+        PaypalOrderDiagnostic diagnostic = new PaypalOrderDiagnostic(
+                200, "COMPLETED", "CAPTURE", List.of(pu), null, null, null, null);
+        
+        when(orderRepository.findById(orderId)).thenReturn(Optional.of(order));
+        when(attemptRepository.findById(attemptId)).thenReturn(Optional.of(attempt));
+        when(paypalClient.diagnoseOrder("PAYPAL-ORDER-123")).thenReturn(diagnostic);
+
+        ReconciliationSafetyService.ReconciliationResult result = service.reconcileIfAuthorized(orderId, attemptId);
+
+        assertThat(result.success()).isFalse();
+        assertThat(result.code()).isEqualTo("CAPTURE_CURRENCY_MISMATCH");
+    }
+
+    @Test
+    void failsWhenCaptureIdMismatch() {
+        attempt.setProviderCaptureReference("CAPTURE-999");
+        PaypalOrderUnitDiagnostic pu = completedCaptureUnit();
+        PaypalOrderDiagnostic diagnostic = new PaypalOrderDiagnostic(
+                200, "COMPLETED", "CAPTURE", List.of(pu), null, null, null, null);
+        
+        when(orderRepository.findById(orderId)).thenReturn(Optional.of(order));
+        when(attemptRepository.findById(attemptId)).thenReturn(Optional.of(attempt));
+        when(paypalClient.diagnoseOrder("PAYPAL-ORDER-123")).thenReturn(diagnostic);
+
+        ReconciliationSafetyService.ReconciliationResult result = service.reconcileIfAuthorized(orderId, attemptId);
+
+        assertThat(result.success()).isFalse();
+        assertThat(result.code()).isEqualTo("CAPTURE_REFERENCE_MISMATCH");
+    }
+
+    @Test
+    void failsWhenReferenceMissingOnAttempt() {
+        order.setMerchantOrderReference(null);
+        when(orderRepository.findById(orderId)).thenReturn(Optional.of(order));
+        when(attemptRepository.findById(attemptId)).thenReturn(Optional.of(attempt));
+
+        ReconciliationSafetyService.ReconciliationResult result = service.reconcileIfAuthorized(orderId, attemptId);
+
+        assertThat(result.success()).isFalse();
+        assertThat(result.code()).isEqualTo("MISSING_PURCHASE_UNIT");
+    }
+
+    @Test
+    void rejectsWhenPurchaseUnitReferenceDoesNotMatch() {
+        PaypalOrderUnitDiagnostic pu = new PaypalOrderUnitDiagnostic(
+                "other-ref-123", "USD", "100.00",
+                "CAPTURE-456", "COMPLETED", "100.00", "USD");
+        PaypalOrderDiagnostic diagnostic = new PaypalOrderDiagnostic(
+                200, "COMPLETED", "CAPTURE", List.of(pu), null, null, null, null);
+
+        when(orderRepository.findById(orderId)).thenReturn(Optional.of(order));
+        when(attemptRepository.findById(attemptId)).thenReturn(Optional.of(attempt));
+        when(paypalClient.diagnoseOrder("PAYPAL-ORDER-123")).thenReturn(diagnostic);
+
+        ReconciliationSafetyService.ReconciliationResult result = service.reconcileIfAuthorized(orderId, attemptId);
+
+        assertThat(result.success()).isFalse();
+        assertThat(result.code()).isEqualTo("MISSING_PURCHASE_UNIT");
+    }
+
+    @Test
+    void matchesCorrectUnitWhenMultiplePurchaseUnitsExist() {
+        PaypalOrderUnitDiagnostic nonMatching = new PaypalOrderUnitDiagnostic(
+                "other-ref-123", "USD", "50.00", null, null, null, null);
+        PaypalOrderUnitDiagnostic matching = completedCaptureUnit();
+        PaypalOrderDiagnostic diagnostic = new PaypalOrderDiagnostic(
+                200, "COMPLETED", "CAPTURE", List.of(nonMatching, matching), null, null, null, null);
+
+        when(orderRepository.findById(orderId)).thenReturn(Optional.of(order));
+        when(attemptRepository.findById(attemptId)).thenReturn(Optional.of(attempt));
+        when(paypalClient.diagnoseOrder("PAYPAL-ORDER-123")).thenReturn(diagnostic);
+        when(orderRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(attemptRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        ReconciliationSafetyService.ReconciliationResult result = service.reconcileIfAuthorized(orderId, attemptId);
+
+        assertThat(result.success()).isTrue();
+        assertThat(result.code()).isEqualTo("RECONCILED");
+    }
+
+    @Test
+    void rejectsWhenMultipleUnitsHaveSameMatchingReference() {
+        PaypalOrderUnitDiagnostic firstMatching = completedCaptureUnit();
+        PaypalOrderUnitDiagnostic secondMatching = new PaypalOrderUnitDiagnostic(
+                "order-ref-123", "USD", "100.00", "CAPTURE-789", "COMPLETED", "100.00", "USD");
+        PaypalOrderDiagnostic diagnostic = new PaypalOrderDiagnostic(
+                200, "COMPLETED", "CAPTURE", List.of(firstMatching, secondMatching), null, null, null, null);
+
+        when(orderRepository.findById(orderId)).thenReturn(Optional.of(order));
+        when(attemptRepository.findById(attemptId)).thenReturn(Optional.of(attempt));
+        when(paypalClient.diagnoseOrder("PAYPAL-ORDER-123")).thenReturn(diagnostic);
+
+        ReconciliationSafetyService.ReconciliationResult result = service.reconcileIfAuthorized(orderId, attemptId);
+
+        assertThat(result.success()).isFalse();
+        assertThat(result.code()).isEqualTo("MISSING_PURCHASE_UNIT");
+    }
+
+    @Test
+    void rejectsWhenNoPurchaseUnitMatchesReference() {
+        PaypalOrderUnitDiagnostic nonMatching = new PaypalOrderUnitDiagnostic(
+                "other-ref-123", "USD", "100.00",
+                "CAPTURE-456", "COMPLETED", "100.00", "USD");
+        PaypalOrderDiagnostic diagnostic = new PaypalOrderDiagnostic(
+                200, "COMPLETED", "CAPTURE", List.of(nonMatching), null, null, null, null);
+
+        when(orderRepository.findById(orderId)).thenReturn(Optional.of(order));
+        when(attemptRepository.findById(attemptId)).thenReturn(Optional.of(attempt));
+        when(paypalClient.diagnoseOrder("PAYPAL-ORDER-123")).thenReturn(diagnostic);
+
+        ReconciliationSafetyService.ReconciliationResult result = service.reconcileIfAuthorized(orderId, attemptId);
+
+        assertThat(result.success()).isFalse();
+        assertThat(result.code()).isEqualTo("MISSING_PURCHASE_UNIT");
     }
 }

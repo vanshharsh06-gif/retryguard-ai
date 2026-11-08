@@ -42,7 +42,6 @@ public class StuckOrderDetectionService {
     }
 
     @Scheduled(fixedDelayString = "${retryguard.ai.agent.scan-interval-ms:300000}")
-    @Transactional
     public void scanForStuckOrders() {
         if (!properties.enabled() || !properties.schedulerEnabled()) {
             return;
@@ -75,7 +74,7 @@ public class StuckOrderDetectionService {
                 workflowService.runWorkflow(order.getId());
                 processed++;
             } catch (Exception e) {
-                log.warn("Agent workflow failed for order {}: {}", order.getId(), e.getMessage());
+                log.warn("Agent workflow failed for order {}", order.getId());
             }
         }
 
@@ -84,7 +83,6 @@ public class StuckOrderDetectionService {
         }
     }
 
-    @Transactional
     public int runManualScan() {
         if (!properties.enabled()) {
             throw new IllegalStateException("Agent is disabled via configuration");
@@ -111,7 +109,7 @@ public class StuckOrderDetectionService {
                 workflowService.runWorkflow(order.getId());
                 processed++;
             } catch (Exception e) {
-                log.warn("Manual agent workflow failed for order {}: {}", order.getId(), e.getMessage());
+                log.warn("Manual agent workflow failed for order {}", order.getId());
             }
         }
 

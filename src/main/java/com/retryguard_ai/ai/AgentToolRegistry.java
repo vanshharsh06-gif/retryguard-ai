@@ -190,7 +190,8 @@ public class AgentToolRegistry {
                     List<PaymentEvent> events = eventRepository.findByPaymentAttempt_IdInOrderByReceivedAtAsc(attemptIds);
                     return events.stream()
                             .filter(e -> e.getSourceType() == PaymentEvent.SourceType.PROVIDER
-                                    && e.getVerificationStatus() == PaymentEvent.VerificationStatus.VERIFIED)
+                                    && e.getVerificationStatus() == PaymentEvent.VerificationStatus.VERIFIED
+                                    && "PAYPAL_SANDBOX".equals(e.getProvider()))
                             .map(this::toWebhookSummary)
                             .toList();
                 }
@@ -319,6 +320,10 @@ public class AgentToolRegistry {
                         Map<String, Object> pu = new java.util.HashMap<>();
                         pu.put("currencyCode", u.currencyCode() != null ? u.currencyCode() : "UNKNOWN");
                         pu.put("value", u.value() != null ? u.value() : "0.00");
+                        pu.put("captureId", u.captureId() != null ? u.captureId() : null);
+                        pu.put("captureStatus", u.captureStatus() != null ? u.captureStatus() : null);
+                        pu.put("captureAmount", u.captureAmount() != null ? u.captureAmount() : null);
+                        pu.put("captureCurrency", u.captureCurrency() != null ? u.captureCurrency() : null);
                         return pu;
                     })
                     .toList());
@@ -339,8 +344,28 @@ public class AgentToolRegistry {
         result.put("localAttemptStatus", attempt.getPaymentStatus() != null ? attempt.getPaymentStatus().name() : null);
         result.put("localProviderStatus", attempt.getProviderStatus() != null ? attempt.getProviderStatus() : null);
         result.put("localProviderCaptureReference", maskReference(attempt.getProviderCaptureReference()));
-        result.put("amountMatch", attempt.getAmount() != null ? attempt.getAmount().toPlainString() : null);
-        result.put("currencyMatch", attempt.getCurrency() != null ? attempt.getCurrency() : null);
+        
+        // Return clearly distinguishable local vs PayPal values instead of misleading match fields
+        result.put("localAmount", attempt.getAmount() != null ? attempt.getAmount().toPlainString() : null);
+        result.put("localCurrency", attempt.getCurrency() != null ? attempt.getCurrency() : null);
+        
+        if (diagnostic.purchaseUnits() != null && !diagnostic.purchaseUnits().isEmpty()) {
+            PaypalClient.PaypalOrderUnitDiagnostic pu = diagnostic.purchaseUnits().get(0);
+            result.put("paypalPurchaseUnitAmount", pu.value());
+            result.put("paypalPurchaseUnitCurrency", pu.currencyCode());
+            
+            if (pu.captureAmount() != null) {
+                result.put("paypalCaptureAmount", pu.captureAmount());
+                result.put("paypalCaptureCurrency", pu.captureCurrency());
+            }
+            
+            if (pu.captureId() != null) {
+                result.put("paypalCaptureId", pu.captureId());
+            }
+        } else {
+            result.put("paypalPurchaseUnitAmount", null);
+            result.put("paypalPurchaseUnitCurrency", null);
+        }
 
         if (diagnostic.errorName() != null) {
             result.put("errorName", diagnostic.errorName());

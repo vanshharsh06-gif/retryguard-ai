@@ -45,7 +45,7 @@ class InvestigationQueryControllerTest {
                 new InvestigationResponse(id, UUID.randomUUID(), "WAIT", "NO_PAYMENT_ATTEMPTS",
                         "1.0", "No attempts.", new EvidenceSnapshot(
                         "CREATED", OffsetDateTime.now(), 15, List.of()), List.of(),
-                        OffsetDateTime.now()));
+                        List.of(), List.of(), OffsetDateTime.now()));
 
         mockMvc.perform(get("/api/investigations/{id}", id))
                 .andExpect(status().isOk())

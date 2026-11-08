@@ -44,7 +44,8 @@ public class PaypalClient {
                         new PaypalAmount(
                                 attempt.getCurrency(),
                                 attempt.getAmount().setScale(2, RoundingMode.UNNECESSARY)
-                                        .toPlainString()))),
+                                        .toPlainString()),
+                        null)),
                 new PaypalPaymentSource(
                         new PaypalPaypal(
                                 new PaypalExperienceContext(
@@ -87,9 +88,7 @@ public class PaypalClient {
             List<PaypalOrderUnitDiagnostic> units = body == null || body.purchase_units() == null
                     ? List.of()
                     : body.purchase_units().stream()
-                            .map(unit -> new PaypalOrderUnitDiagnostic(
-                                    unit.amount() == null ? null : unit.amount().currency_code(),
-                                    unit.amount() == null ? null : unit.amount().value()))
+                            .map(unit -> resolveCaptureFromUnit(unit))
                             .toList();
             PaypalOrderApprovalLink approvalLink = body == null || body.links() == null
                     ? null
@@ -114,6 +113,46 @@ public class PaypalClient {
                     error == null ? null : error.message(),
                     error == null ? null : error.debug_id());
         }
+    }
+
+    private PaypalOrderUnitDiagnostic resolveCaptureFromUnit(PaypalPurchaseUnit unit) {
+        String referenceId = unit.reference_id();
+        String currencyCode = unit.amount() == null ? null : unit.amount().currency_code();
+        String value = unit.amount() == null ? null : unit.amount().value();
+        PaypalPayments payments = unit.payments();
+        List<PaypalCapture> captures = payments == null ? List.of()
+                : (payments.captures() == null ? List.of() : payments.captures());
+
+        if (captures.isEmpty()) {
+            return new PaypalOrderUnitDiagnostic(referenceId, currencyCode, value,
+                    null, null, null, null);
+        }
+        if (captures.size() == 1) {
+            PaypalCapture capture = captures.get(0);
+            return new PaypalOrderUnitDiagnostic(
+                    referenceId, currencyCode, value,
+                    capture.id(), capture.status(),
+                    capture.amount() == null ? null : capture.amount().value(),
+                    capture.amount() == null ? null : capture.amount().currency_code());
+        }
+        // Multiple captures exist - resolve using reliable identifiers or reject ambiguity
+        PaypalCapture resolved = selectCapture(captures);
+        if (resolved == null) {
+            return new PaypalOrderUnitDiagnostic(referenceId, currencyCode, value,
+                    null, null, null, null);
+        }
+        return new PaypalOrderUnitDiagnostic(
+                referenceId, currencyCode, value,
+                resolved.id(), resolved.status(),
+                resolved.amount() == null ? null : resolved.amount().value(),
+                resolved.amount() == null ? null : resolved.amount().currency_code());
+    }
+
+    private PaypalCapture selectCapture(List<PaypalCapture> captures) {
+        // When multiple captures exist, do not blindly select the first.
+        // Return null to indicate ambiguity that must be resolved by the caller
+        // using reliable identifiers (e.g., stored capture reference).
+        return null;
     }
 
     private static PaypalOrderApprovalLink diagnosticApprovalLink(PaypalLink link) {
@@ -254,7 +293,7 @@ public class PaypalClient {
             PaypalPaymentSource payment_source) {
     }
 
-    private record PaypalPurchaseUnit(String reference_id, PaypalAmount amount) {
+    private record PaypalPurchaseUnit(String reference_id, PaypalAmount amount, PaypalPayments payments) {
     }
 
     private record PaypalPaymentSource(PaypalPaypal paypal) {
@@ -292,7 +331,9 @@ public class PaypalClient {
             String errorName, String errorMessage, String debugId) {
     }
 
-    public record PaypalOrderUnitDiagnostic(String currencyCode, String value) {
+    public record PaypalOrderUnitDiagnostic(String referenceId, String currencyCode, String value,
+                                            String captureId, String captureStatus,
+                                            String captureAmount, String captureCurrency) {
     }
 
     public record PaypalOrderApprovalLink(

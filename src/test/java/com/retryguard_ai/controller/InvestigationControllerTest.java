@@ -58,7 +58,9 @@ class InvestigationControllerTest {
                 now,
                 "PROVIDER_CREATE_TIME",
                 "FRESH",
-                true);
+                true,
+                null,
+                null);
         InvestigationResponse response = new InvestigationResponse(
                 UUID.randomUUID(),
                 orderId,
@@ -68,7 +70,10 @@ class InvestigationControllerTest {
                 "Terminal denial evidence is fresh.",
                 new EvidenceSnapshot("FAILED", now, 15,
                         List.of(new AttemptEvidence(UUID.randomUUID(), "PAYPAL_SANDBOX",
-                                "FAILED", List.of(event)))),
+                                "FAILED", now, List.of(event)))),
+                List.of(),
+                List.of(),
+                List.of(),
                 now);
         when(investigationService.investigate(orderId)).thenReturn(response);
 
@@ -102,7 +107,7 @@ class InvestigationControllerTest {
         InvestigationResponse response = new InvestigationResponse(
                 UUID.randomUUID(), orderId, "WAIT", "NO_PAYMENT_ATTEMPTS", "1.0",
                 "No attempts.", new EvidenceSnapshot("CREATED", OffsetDateTime.now(), 15, List.of()),
-                List.of(), OffsetDateTime.now());
+                List.of(), List.of(), List.of(), OffsetDateTime.now());
         when(investigationService.getInvestigationsForOrder(orderId)).thenReturn(List.of(response));
 
         mockMvc.perform(get("/api/orders/{orderId}/investigations", orderId))
