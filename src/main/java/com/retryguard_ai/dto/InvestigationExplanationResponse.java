@@ -11,7 +11,6 @@ public record InvestigationExplanationResponse(
         Source source) {
 
     public enum Source {
-        GEMINI,
-        DETERMINISTIC_FALLBACK
+        DETERMINISTIC
     }
 }

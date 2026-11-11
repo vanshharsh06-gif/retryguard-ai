@@ -20,10 +20,6 @@ retryguard:
     api-base-url: https://api-m.sandbox.paypal.com
     public-base-url: ${PAYPAL_PUBLIC_BASE_URL:http://localhost:8080}
   ai:
-    gemini:
-      api-key: ${GEMINI_API_KEY:}
-      model: ${GEMINI_MODEL:gemini-2.5-flash}
-      endpoint: ${GEMINI_ENDPOINT:https://generativelanguage.googleapis.com/v1beta}
     agent:
       enabled: false
       scheduler-enabled: false

@@ -11,6 +11,9 @@ import com.retryguard_ai.entity.MerchantOrder;
 import com.retryguard_ai.repository.AgentWorkflowRepository;
 import com.retryguard_ai.repository.AgentWorkflowStepRepository;
 import com.retryguard_ai.repository.MerchantOrderRepository;
+import jakarta.annotation.PostConstruct;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.jdbc.support.SQLErrorCodeSQLExceptionTranslator;
 import org.springframework.stereotype.Service;
@@ -44,6 +47,8 @@ import java.util.stream.Collectors;
 @Service
 public class AgentWorkflowService {
 
+    private static final Logger log = LoggerFactory.getLogger(AgentWorkflowService.class);
+
     private final AgentOrchestrator agentOrchestrator;
     private final AgentWorkflowRepository workflowRepository;
     private final AgentWorkflowStepRepository stepRepository;
@@ -70,6 +75,21 @@ public class AgentWorkflowService {
         this.agentProperties = agentProperties;
         this.persistenceService = persistenceService;
         this.objectMapper = objectMapper;
+    }
+
+    /**
+     * Log the resolved agent configuration once at startup so operators can
+     * diagnose "SKIPPED · AGENT_DISABLED" without exposing the API key value.
+     */
+    @PostConstruct
+    void logAgentConfiguration() {
+        boolean enabled = agentProperties.enabled();
+        boolean groqConfigured = agentProperties.groq() != null
+                && agentProperties.groq().isConfigured();
+        log.info("Agent configuration resolved: enabled={} groqConfigured={} model={}",
+                enabled,
+                groqConfigured,
+                agentProperties.groq() == null ? "" : agentProperties.groq().model());
     }
 
     /**
@@ -100,6 +120,11 @@ public class AgentWorkflowService {
         if (!agentProperties.enabled()) {
             return createSkippedWorkflow(orderId, "AGENT_DISABLED", "Agent is disabled via configuration");
         }
+
+        // NOTE: a missing Groq API key is handled downstream by GroqAgentProvider,
+        // which returns a PROVIDER_UNAVAILABLE result with a clear message. That
+        // status is persisted and surfaced to the dashboard, so no additional
+        // service-level guard is required here.
 
         // Check for existing running workflow (application-level guard;
         // DB partial unique index enforces at database level)
@@ -156,6 +181,11 @@ public class AgentWorkflowService {
      * All transactional database work is delegated to
      * AgentWorkflowPersistenceService, which is a separate Spring-managed
      * bean with proper @Transactional annotations.
+     * <p>
+     * NOTE: This method is private and does NOT have @Transactional.
+     * Spring's proxy-based transaction management does not apply to private methods,
+     * so all database operations must go through the persistence service's
+     * public transactional methods.
      */
     private AgentWorkflowResponse persistResults(AgentWorkflow workflow, GroqAgentProvider.AgentRunResult result) {
         workflow.setStatus(result.status());

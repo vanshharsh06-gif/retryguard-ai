@@ -1,59 +1,104 @@
+
 package com.retryguard_ai.security;
 
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
-import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.HttpStatusEntryPoint;
+import org.springframework.security.web.authentication.www.BasicAuthenticationFilter;
+import org.springframework.security.web.csrf.CsrfToken;
 import org.springframework.security.web.csrf.CsrfTokenRequestAttributeHandler;
 import org.springframework.security.web.csrf.CookieCsrfTokenRepository;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+import org.springframework.web.filter.OncePerRequestFilter;
 
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
-/**
- * Spring Security configuration for RetryGuard AI.
- *
- * Security design:
- * - Permitted without authentication:
- *   * GET /api/orders (read-only order listing used by the dashboard)
- *   * /api/webhooks/paypal (PayPal webhook — protected by mandatory signature verification)
- *   * /error, /actuator/health, /actuator/info
- * - All other HTTP methods on /api/orders and all other endpoints require authentication.
- * - Authentication is HTTP Basic using credentials from environment variables.
- * - CSRF uses cookie-based token storage so the dashboard can submit state-changing
- *   requests (POST forms) after obtaining the CSRF token cookie. PayPal webhooks are
- *   excluded from CSRF since PayPal cannot present a CSRF token.
- * - The PayPal webhook signature verification is NEVER bypassed.
- * - CORS is restricted to configured allowed origins.
- */
 @Configuration
 @EnableWebSecurity
 public class SecurityConfig {
 
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+
+        CsrfTokenRequestAttributeHandler csrfRequestHandler =
+                new CsrfTokenRequestAttributeHandler();
+
         http
                 .csrf(csrf -> csrf
-                        .csrfTokenRepository(CookieCsrfTokenRepository.withHttpOnlyFalse())
-                        .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler())
-                        .ignoringRequestMatchers("/api/webhooks/paypal"))
-                .cors(cors -> cors.configurationSource(corsConfigurationSource()))
+                        .csrfTokenRepository(
+                                CookieCsrfTokenRepository.withHttpOnlyFalse()
+                        )
+                        .csrfTokenRequestHandler(csrfRequestHandler)
+                        .ignoringRequestMatchers("/api/webhooks/paypal")
+                )
+
+                // Eagerly resolve the CSRF token so the XSRF-TOKEN cookie is
+                // written on the first response. Without this, the deferred
+                // CsrfTokenRequestAttributeHandler only writes the cookie when
+                // the token is accessed, and the browser dashboard's first
+                // mutating request would be rejected with 403.
+                .addFilterAfter(new CsrfCookieFilter(), BasicAuthenticationFilter.class)
+
+                .cors(cors -> cors
+                        .configurationSource(corsConfigurationSource())
+                )
+
                 .authorizeHttpRequests(auth -> auth
-                        // Read-only GET order listing is public (dashboard)
-                        .requestMatchers(HttpMethod.GET, "/api/orders").permitAll()
-                        // Webhook endpoint is public but protected by signature verification
+                        .requestMatchers("/login", "/error").permitAll()
+
+                        .requestMatchers(HttpMethod.GET, "/api/orders")
+                        .permitAll()
+
+                        // Allow PayPal browser return/cancel redirects
+                        .requestMatchers(
+                                HttpMethod.GET,
+                                "/api/payment-attempts/*/paypal/return",
+                                "/api/payment-attempts/*/paypal/cancel"
+                        ).permitAll()
+
                         .requestMatchers("/api/webhooks/paypal").permitAll()
-                        .requestMatchers("/error", "/actuator/health", "/actuator/info").permitAll()
-                        // Everything else requires authentication
+
+                        .requestMatchers(
+                                "/actuator/health",
+                                "/actuator/info"
+                        ).permitAll()
+
                         .anyRequest().authenticated()
                 )
-                .httpBasic(httpBasic -> httpBasic
+
+                // Form-based browser login
+                .formLogin(form -> form
+                        .defaultSuccessUrl("/", true)
+                        .permitAll()
+                )
+
+                // Preserve HTTP Basic for API clients
+                .httpBasic(basic -> basic
                         .realmName("RetryGuard AI")
+                )
+
+                // API requests receive 401 instead of login redirects
+                .exceptionHandling(exception -> exception
+                        .defaultAuthenticationEntryPointFor(
+                                new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED),
+                                request -> request.getServletPath().startsWith("/api/")
+                        )
                 );
 
         return http.build();
@@ -61,24 +106,84 @@ public class SecurityConfig {
 
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
+
         CorsConfiguration configuration = new CorsConfiguration();
-        String allowedOrigins = System.getenv("RETRYGUARD_CORS_ALLOWED_ORIGINS");
+
+        String allowedOrigins =
+                System.getenv("RETRYGUARD_CORS_ALLOWED_ORIGINS");
+
+        Set<String> patterns = new LinkedHashSet<>();
         if (allowedOrigins != null && !allowedOrigins.isBlank()) {
-            configuration.setAllowedOriginPatterns(List.of(allowedOrigins.split(",")));
+            Arrays.stream(allowedOrigins.split(","))
+                    .map(String::trim)
+                    .filter(s -> !s.isEmpty())
+                    .forEach(patterns::add);
         } else {
-            // Development-only fallback: same-origin. Production must set
-            // RETRYGUARD_CORS_ALLOWED_ORIGINS explicitly.
-            configuration.setAllowedOriginPatterns(List.of("http://localhost:*"));
+            // Sensible local-demo defaults: localhost for the IntelliJ run,
+            // and the configured ngrok public base URL for PayPal redirects.
+            patterns.add("http://localhost:*");
+            patterns.add("https://localhost:*");
+            patterns.add("https://*.ngrok-free.dev");
+            patterns.add("https://*.ngrok-free.app");
+            patterns.add("https://*.ngrok.io");
+
+            String publicBaseUrl = System.getenv("PAYPAL_PUBLIC_BASE_URL");
+            if (publicBaseUrl != null && !publicBaseUrl.isBlank()) {
+                patterns.add(publicBaseUrl.trim());
+            }
         }
-        configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
-        configuration.setAllowedHeaders(List.of("Authorization", "Content-Type",
-                "PAYPAL-AUTH-ALGO", "PAYPAL-CERT-URL", "PAYPAL-TRANSMISSION-ID",
-                "PAYPAL-TRANSMISSION-SIG", "PAYPAL-TRANSMISSION-TIME",
-                "X-XSRF-TOKEN", "X-CSRF-TOKEN"));
+
+        configuration.setAllowedOriginPatterns(new ArrayList<>(patterns));
+
+        configuration.setAllowedMethods(
+                List.of("GET", "POST", "PUT", "DELETE", "OPTIONS")
+        );
+
+        configuration.setAllowedHeaders(
+                List.of(
+                        "Authorization",
+                        "Content-Type",
+                        "PAYPAL-AUTH-ALGO",
+                        "PAYPAL-CERT-URL",
+                        "PAYPAL-TRANSMISSION-ID",
+                        "PAYPAL-TRANSMISSION-SIG",
+                        "PAYPAL-TRANSMISSION-TIME",
+                        "X-XSRF-TOKEN",
+                        "X-CSRF-TOKEN"
+                )
+        );
+
         configuration.setAllowCredentials(true);
         configuration.setMaxAge(3600L);
-        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+
+        UrlBasedCorsConfigurationSource source =
+                new UrlBasedCorsConfigurationSource();
+
         source.registerCorsConfiguration("/**", configuration);
+
         return source;
+    }
+
+    /**
+     * Forces CSRF token resolution on every request so the XSRF-TOKEN cookie
+     * is emitted on the response. Without eager resolution, the deferred
+     * {@link CsrfTokenRequestAttributeHandler} only writes the cookie when the
+     * token is actually accessed during request handling, which caused the
+     * browser dashboard's first mutating request to fail with 403.
+     */
+    static final class CsrfCookieFilter extends OncePerRequestFilter {
+        @Override
+        protected void doFilterInternal(HttpServletRequest request,
+                                         HttpServletResponse response,
+                                         FilterChain filterChain)
+                throws ServletException, IOException {
+            CsrfToken csrfToken = (CsrfToken) request.getAttribute(CsrfToken.class.getName());
+            if (csrfToken != null) {
+                // Access the token to trigger the deferred CookieCsrfTokenRepository
+                // to write the XSRF-TOKEN cookie on the response.
+                csrfToken.getToken();
+            }
+            filterChain.doFilter(request, response);
+        }
     }
 }

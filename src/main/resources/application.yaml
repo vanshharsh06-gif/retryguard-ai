@@ -33,13 +33,9 @@ retryguard:
     public-base-url: ${PAYPAL_PUBLIC_BASE_URL:https://snitch-antennae-shield.ngrok-free.dev}
 
   ai:
-    gemini:
-      api-key: ${GEMINI_API_KEY:}
-      model: ${GEMINI_MODEL:gemini-2.5-flash}
-      endpoint: ${GEMINI_ENDPOINT:https://generativelanguage.googleapis.com/v1beta}
     agent:
-      enabled: true
-      scheduler-enabled: false
+      enabled: ${RETRYGUARD_AI_AGENT_ENABLED:true}
+      scheduler-enabled: ${RETRYGUARD_AI_AGENT_SCHEDULER_ENABLED:false}
       stuck-order-minutes: 30
       max-tool-calls: 8
       max-runs-per-scan: 10

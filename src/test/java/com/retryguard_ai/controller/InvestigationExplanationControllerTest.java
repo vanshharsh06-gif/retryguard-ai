@@ -42,7 +42,7 @@ class InvestigationExplanationControllerTest {
         when(explanationService.explain(investigationId)).thenReturn(
                 new InvestigationExplanationResponse(
                         investigationId, "WAIT", "INSUFFICIENT_EVIDENCE", "1.0",
-                        "The evidence is incomplete.", InvestigationExplanationResponse.Source.GEMINI));
+                        "The evidence is incomplete.", InvestigationExplanationResponse.Source.DETERMINISTIC));
 
         mockMvc.perform(post("/api/investigations/{id}/explanation", investigationId))
                 .andExpect(status().isOk())
@@ -50,7 +50,7 @@ class InvestigationExplanationControllerTest {
                 .andExpect(jsonPath("$.decision").value("WAIT"))
                 .andExpect(jsonPath("$.reason").value("INSUFFICIENT_EVIDENCE"))
                 .andExpect(jsonPath("$.explanation").value("The evidence is incomplete."))
-                .andExpect(jsonPath("$.source").value("GEMINI"));
+                .andExpect(jsonPath("$.source").value("DETERMINISTIC"));
     }
 
     @Test

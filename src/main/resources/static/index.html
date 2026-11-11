@@ -80,7 +80,7 @@
         <p class="muted small">The deterministic rules decide. Findings cite persisted evidence and never execute a payment action.</p>
         <label for="investigation-select">Previous investigations</label><select id="investigation-select"><option value="">No investigations loaded</option></select>
         <div id="investigation-result" class="empty" style="margin-top:12px">Run an investigation or select a previous run.</div>
-        <div class="actions"><button id="explain" class="secondary" type="button" disabled>Explain with Gemini</button></div>
+        <div class="actions"><button id="explain" class="secondary" type="button" disabled>Explain decision</button></div>
         <div id="explanation" class="hidden explanation" aria-live="polite"></div>
       </section>
       <section class="card">
@@ -261,17 +261,42 @@
       $("history").className = "history";
       $("history").innerHTML = items.map((entry) => `<div class="history-row"><strong>${escapeHtml(entry.action)}</strong> · ${escapeHtml(entry.previousDecision || "—")} → ${escapeHtml(entry.newDecision || "—")}<br><span class="muted">${escapeHtml(entry.reason)} · ${escapeHtml(time(entry.createdAt))}</span></div>`).join("");
     }
-    $("order-form").addEventListener("submit", async (event) => {
-      event.preventDefault(); const form = new FormData(event.currentTarget);
-      const payload = Object.fromEntries(form.entries()); payload.amount = Number(payload.amount);
+    const orderForm = $("order-form");
+    orderForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+
+      // Save the form element before awaiting the API request.
+      // event.currentTarget can be null after an asynchronous operation.
+      const formElement = event.currentTarget;
+      const form = new FormData(formElement);
+      const payload = Object.fromEntries(form.entries());
+      payload.amount = Number(payload.amount);
       payload.currency = payload.currency.trim().toUpperCase();
-      $("create-order").disabled = true; message("create-status", "Creating order…");
+
+      const createButton = $("create-order");
+      createButton.disabled = true;
+      message("create-status", "Creating order…");
+
       try {
-        const order = await api("/api/orders", { method: "POST", body: JSON.stringify(payload) });
-        message("create-status", `Order created: ${order.merchantOrderReference}`, "success");
-        event.currentTarget.reset(); $("currency").value = "USD"; await loadOrders(order.id);
-      } catch (error) { message("create-status", error.message, "error"); }
-      finally { $("create-order").disabled = false; }
+        const order = await api("/api/orders", {
+          method: "POST",
+          body: JSON.stringify(payload)
+        });
+
+        message(
+          "create-status",
+          `Order created: ${order.merchantOrderReference}`,
+          "success"
+        );
+
+        formElement.reset();
+        $("currency").value = "USD";
+        await loadOrders(order.id);
+      } catch (error) {
+        message("create-status", error.message, "error");
+      } finally {
+        createButton.disabled = false;
+      }
     });
     $("refresh-orders").addEventListener("click", () => loadOrders().catch((error) => {
       $("order-summary").className = "empty"; $("order-summary").textContent = error.message;
@@ -336,15 +361,21 @@
       const box = $("explanation"); box.classList.remove("hidden"); box.textContent = "Requesting explanation…";
       try {
         const result = await api(`/api/investigations/${encodeURIComponent(state.investigationId)}/explanation`, { method: "POST" });
-        box.textContent = `${result.source === "GEMINI" ? "Gemini explanation" : "Deterministic fallback"} · decision remains ${result.decision}\n\n${result.explanation}`;
+        box.textContent = `Deterministic explanation · decision remains ${result.decision}\n\n${result.explanation}`;
       } catch (error) { box.textContent = `Explanation unavailable: ${error.message}`; }
       finally { button.disabled = false; }
     });
 
     // Agentic AI Workflow handlers
     const WORKFLOW_ERROR_STATUSES = new Set([
-      "ERROR", "PROVIDER_ERROR", "BUDGET_EXCEEDED", "FAILED"
+      "ERROR", "PROVIDER_ERROR", "PROVIDER_UNAVAILABLE", "NOT_CONFIGURED",
+      "BUDGET_EXCEEDED", "INVALID_TOOL", "TOOL_ERROR", "INVALID_RESPONSE", "FAILED"
     ]);
+
+    // SKIPPED workflows (AGENT_DISABLED, GROQ_NOT_CONFIGURED, ORDER_ALREADY_PAID,
+    // WORKFLOW_ALREADY_RUNNING) are advisory notices, not hard errors; they are
+    // shown with a neutral/warning style via the summary text.
+    const WORKFLOW_NOTICE_STATUSES = new Set(["SKIPPED"]);
 
     function workflowStatusLabel(status) {
       return String(status || "UNKNOWN").replaceAll("_", " ");
@@ -463,8 +494,9 @@
       const status = state.workflowStatus || "UNKNOWN";
       const isRunning = status === "RUNNING";
       const isError = WORKFLOW_ERROR_STATUSES.has(status);
+      const isNotice = WORKFLOW_NOTICE_STATUSES.has(status);
 
-      statusNode.className = `status ${isError ? "error" : (isRunning ? "muted" : "success")}`;
+      statusNode.className = `status ${isError ? "error" : (isRunning || isNotice ? "muted" : "success")}`;
       statusNode.textContent = isRunning
         ? `Running… (${idShort(state.workflowId)})`
         : `${workflowStatusLabel(status)} · Workflow ${idShort(state.workflowId)}`;
@@ -478,7 +510,7 @@
       detailsNode.innerHTML = `
         <div class="finding-top">
           <h4>Agent workflow result</h4>
-          <span class="tag ${isError ? "HIGH" : (isRunning ? "MEDIUM" : "LOW")}">${escapeHtml(workflowStatusLabel(status))}</span>
+          <span class="tag ${isError ? "HIGH" : (isRunning || isNotice ? "MEDIUM" : "LOW")}">${escapeHtml(workflowStatusLabel(status))}</span>
         </div>
         <p><strong>Workflow ID:</strong> <span class="small">${escapeHtml(state.workflowId || "Unavailable")}</span></p>
         <p><strong>Steps executed:</strong> ${state.workflowStepCount}</p>
@@ -488,7 +520,10 @@
         <p class="muted small">Advisory only. The agent uses read-only diagnostic tools and does not execute payment actions.</p>
       `;
 
-      startButton.disabled = !state.orderId || isRunning || (!isError && status !== "UNKNOWN");
+      // Allow re-running whenever the previous workflow is in a terminal state
+      // (COMPLETED, SKIPPED, ERROR, RECONCILED, WAITING_FOR_WEBHOOK, etc.).
+      // Only block while RUNNING.
+      startButton.disabled = !state.orderId || isRunning;
       refreshButton.style.display = state.workflowId ? "inline-block" : "none";
     }
 

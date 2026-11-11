@@ -4,6 +4,7 @@ import com.retryguard_ai.dto.PaypalPaymentResponse;
 import com.retryguard_ai.service.PaypalPaymentService;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.web.csrf.CsrfToken;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -11,6 +12,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import jakarta.servlet.http.HttpServletRequest;
 import java.util.UUID;
 
 @RestController
@@ -38,13 +40,17 @@ public class PaypalPaymentController {
     @GetMapping(value = "/return", produces = MediaType.TEXT_HTML_VALUE)
     public ResponseEntity<String> returnFromPaypal(
             @PathVariable UUID paymentAttemptId,
-            @RequestParam String token) {
+            @RequestParam String token,
+            HttpServletRequest request) {
         paypalPaymentService.validateReturn(paymentAttemptId, token);
         String capturePath = "/api/payment-attempts/" + paymentAttemptId + "/paypal/capture";
+        CsrfToken csrf = (CsrfToken) request.getAttribute(CsrfToken.class.getName());
+        String csrfField = csrf != null ? "<input type=\"hidden\" name=\"_csrf\" value=\"" + csrf.getToken() + "\"" : "";
         String page = "<!doctype html><html><body>"
                 + "<h1>PayPal approval received</h1>"
                 + "<p>Approval does not confirm payment. Continue to capture the order.</p>"
                 + "<form method=\"post\" action=\"" + capturePath + "\">"
+                + csrfField
                 + "<button type=\"submit\">Capture payment</button></form>"
                 + "</body></html>";
         return ResponseEntity.ok().contentType(MediaType.TEXT_HTML).body(page);

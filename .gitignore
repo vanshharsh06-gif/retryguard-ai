@@ -48,3 +48,18 @@ application-local.yml
 
 # Local VINAX settings
 .vinax/
+VINAX.local.md
+
+# Logs
+*.log
+
+# Temporary one-off fix/helper scripts
+/fix_*.py
+
+# Temporary test output
+/test_output*.txt
+
+# Editor/working backups
+*.bak
+/src/main/resources/static/index-backup.html
+/src/main/resources/static/retryguard-index-updated.html

@@ -1,0 +1,51 @@
+spring:
+  datasource:
+    url: ${DB_URL:}
+    username: ${DB_USERNAME:retryguard_app}
+    password: ${DB_PASSWORD:}
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: false
+
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: never
+  server:
+    port: ${MANAGEMENT_PORT:8081}
+
+retryguard:
+  paypal:
+    client-id: ${PAYPAL_CLIENT_ID:}
+    client-secret: ${PAYPAL_CLIENT_SECRET:}
+    webhook-id: ${PAYPAL_WEBHOOK_ID:}
+    api-base-url: https://api-m.sandbox.paypal.com
+    public-base-url: ${PAYPAL_PUBLIC_BASE_URL:}
+  ai:
+    agent:
+      enabled: ${RETRYGUARD_AI_AGENT_ENABLED:false}
+      scheduler-enabled: ${RETRYGUARD_AI_AGENT_SCHEDULER_ENABLED:false}
+      stuck-order-minutes: 30
+      max-tool-calls: 4
+      max-runs-per-scan: 10
+      timeout-seconds: 60
+      groq:
+        api-key: ${GROQ_API_KEY:}
+        model: ${GROQ_MODEL:openai/gpt-oss-120b}
+        base-url: ${GROQ_BASE_URL:https://api.groq.com/openai/v1}
+
+# Production security: require explicit credentials via environment variables.
+# No defaults are provided for secrets. Missing values cause startup failure
+# or safe degradation for optional integrations.
